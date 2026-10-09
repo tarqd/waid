@@ -31,7 +31,7 @@ final class TimeEntryTests: XCTestCase {
     }
 
     func testTimers() throws {
-        let p = try store.ensureProject(named: "waid")
+        let p = try store.ensureProject("waid")
         let first = try store.startTimer(projectID: p.id, title: "code", now: t0)
         XCTAssertNil(first.stopped)
         XCTAssertEqual(try store.runningEntry()?.id, first.started.id)
@@ -44,14 +44,6 @@ final class TimeEntryTests: XCTestCase {
         XCTAssertEqual(second.stopped?.end, t0 + 900)
         XCTAssertEqual(try store.stopTimer(now: t0 + 1000)?.id, second.started.id)
         XCTAssertNil(try store.stopTimer(now: t0 + 1100))
-    }
-
-    func testProjectPaths() throws {
-        let clients = try store.ensureProject(named: "Clients")
-        let acme = try store.ensureProject(named: "Acme", parentID: clients.id)
-        try store.createEntry(NewTimeEntry(start: t0, end: t0 + 60, projectID: acme.id, origin: .manual))
-        XCTAssertEqual(try store.projectPaths()[acme.id], "Clients / Acme")
-        XCTAssertEqual(try store.timeEntries(in: DateInterval(start: t0, duration: 3600)).first?.project, "Clients / Acme")
     }
 
     func testMigrationMovesTimersToEntries() throws {
@@ -87,8 +79,8 @@ final class SuggesterTests: XCTestCase {
 
     override func setUpWithError() throws {
         store = try Store(path: ":memory:")
-        waid = try store.ensureProject(named: "waid")
-        chat = try store.ensureProject(named: "Chat")
+        waid = try store.ensureProject("waid")
+        chat = try store.ensureProject("Chat")
         try store.addRule(projectID: waid.id, field: .appName, op: .equals, pattern: "Xcode")
         try store.addRule(projectID: chat.id, field: .appName, op: .equals, pattern: "Slack")
     }

@@ -53,8 +53,8 @@ final class RuleTests: XCTestCase {
                                          sample: ActivitySample(appName: "Safari", url: "https://github.com/tarqd/waid"))
         let b = try store.insertActivity(start: t0 + 600, end: t0 + 900, source: Source.window,
                                          sample: ActivitySample(appName: "Safari", url: "https://news.ycombinator.com"))
-        let waid = try store.ensureProject(named: "waid")
-        let browsing = try store.ensureProject(named: "Browsing")
+        let waid = try store.ensureProject("waid")
+        let browsing = try store.ensureProject("Browsing")
         try store.addRule(projectID: browsing.id, field: .appName, op: .equals, pattern: "safari")
         try store.addRule(projectID: waid.id, field: .url, op: .regex, pattern: "github\\.com/tarqd/waid", priority: 10)
 
@@ -68,13 +68,13 @@ final class RuleTests: XCTestCase {
 
         var filter = Store.ActivityFilter()
         filter.uncategorizedOnly = true
-        try store.assign(activityIDs: [a], projectID: nil)
+        try store.assign(activityIDs: [a], projectID: .some(nil))
         XCTAssertTrue(try store.activities(in: range, filter: filter).isEmpty, "rules still categorize a")
     }
 
     func testInvalidRegexRejected() throws {
         let store = try Store(path: ":memory:")
-        let p = try store.ensureProject(named: "x")
+        let p = try store.ensureProject("x")
         XCTAssertThrowsError(try store.addRule(projectID: p.id, field: .title, op: .regex, pattern: "("))
     }
 }
@@ -153,7 +153,7 @@ final class ClaudeCodeIngestorTests: XCTestCase {
         let first = try store.activities(in: range)
         XCTAssertEqual(first.count, 2)
 
-        let p = try store.ensureProject(named: "waid")
+        let p = try store.ensureProject("waid")
         try store.assign(activityIDs: [first[0].id], projectID: p.id)
         try ingestor.ingest(into: store, full: true)
         let second = try store.activities(in: range)

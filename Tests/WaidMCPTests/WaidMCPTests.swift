@@ -73,10 +73,10 @@ final class MCPServerTests: XCTestCase {
         guard case .array(let rows)? = summary["groups"] else { return XCTFail("\(summary)") }
         XCTAssertEqual(rows.first?["key"], "waid")
         XCTAssertEqual(rows.first?["minutes_by_source"]?["window"], 20)
-        XCTAssertEqual(rows.last?["key"], "(uncategorized)")
+        XCTAssertEqual(rows.last?["key"], "(no project)")
 
-        _ = try call("create_rule", ["project": "nope", "field": "url", "op": "contains", "pattern": "x",
-                                     "create_project": false], expectError: true)
+        _ = try call("create_rule", ["field": "url", "op": "contains", "pattern": "x"], expectError: true)
+        _ = try call("create_rule", ["category": "Nope", "field": "url", "op": "contains", "pattern": "x"], expectError: true)
         _ = try call("summarize", ["range": "fortnight"], expectError: true)
     }
 
@@ -137,5 +137,40 @@ final class MCPServerTests: XCTestCase {
                                expectError: true)
         XCTAssertTrue(overlap.stringValue?.contains("can't overlap") == true, "\(overlap)")
         _ = try call("summarize", ["kind": "entries", "group_by": "app"], expectError: true)
+    }
+
+    func testProfessionalServicesFlow() throws {
+        _ = try call("create_client", ["name": "Acme", "domains": ["acme.com"]])
+        let project = try call("create_project", ["name": "Phase 2", "client": "Acme", "budget_hours": 20])
+        XCTAssertEqual(project["path"], "Acme / Phase 2")
+        XCTAssertEqual(project["billable"], true)
+        _ = try call("create_project", ["name": "Phase 2", "client": "Acme"], expectError: true)
+        _ = try call("create_project", ["name": "Opportunity", "client": "Beta", "status": "prospect"])
+
+        let meeting = try call("create_time_entry", ["start": "2026-10-09T09:00:00Z", "end": "2026-10-09T10:00:00Z",
+                                                     "project": "Acme / Phase 2", "category": "Meetings", "title": "kickoff"])
+        XCTAssertEqual(meeting["client"], "Acme")
+        XCTAssertEqual(meeting["billable"], true)
+        let demo = try call("create_time_entry", ["start": "2026-10-09T10:00:00Z", "end": "2026-10-09T11:00:00Z",
+                                                  "project": "Beta / Opportunity", "category": "Presales", "title": "demo"])
+        XCTAssertEqual(demo["billable"], false)
+        _ = try call("create_time_entry", ["start": "2026-10-09T12:00:00Z", "end": "2026-10-09T13:00:00Z",
+                                           "category": "Typo"], expectError: true)
+
+        let summary = try call("summarize", ["range": "today", "kind": "entries", "group_by": "client"])
+        XCTAssertEqual(summary["utilization"], .number(0.5))
+        XCTAssertEqual(summary["groups"], [["key": "Acme", "minutes": 60, "billable_minutes": 60],
+                                           ["key": "Beta", "minutes": 60, "billable_minutes": 0]])
+
+        let budget = try call("budget_status", ["client": "Acme"])
+        XCTAssertEqual(budget, [["project": "Acme / Phase 2", "client": "Acme", "status": "active", "budget_hours": 20,
+                                 "used_hours": 1, "billable_hours": 1, "draft_hours": 0, "remaining_hours": 19,
+                                 "burn": .number(0.05)]])
+
+        let won = try call("update_project", ["project": "Beta / Opportunity", "status": "active", "name": "Rollout"])
+        XCTAssertEqual(won["path"], "Beta / Rollout")
+
+        let csv = try call("timesheet", ["range": "today", "client": "Beta", "format": "csv"])
+        XCTAssertEqual(csv, "date,client,project,category,hours,billable_hours,notes\n2026-10-09,Beta,Rollout,Presales,1.00,0.00,demo\n")
     }
 }

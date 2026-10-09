@@ -81,6 +81,72 @@ public final class Store {
             FROM activities WHERE source IN ('timer', 'manual');
         DELETE FROM activities WHERE source IN ('timer', 'manual');
         """,
+        // Professional-services model: clients, projects that are either
+        // client engagements or internal, and categories (kind of work) as a
+        // second, independent dimension. Parents of the old project tree
+        // become clients.
+        """
+        CREATE TABLE clients(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            domains TEXT NOT NULL DEFAULT '[]',
+            archived INTEGER NOT NULL DEFAULT 0,
+            created_ts REAL NOT NULL
+        );
+        INSERT INTO clients(name, created_ts)
+            SELECT p.name, p.created_ts FROM projects p
+            WHERE EXISTS (SELECT 1 FROM projects c WHERE c.parent_id = p.id);
+        CREATE TABLE projects_new(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            billable INTEGER NOT NULL DEFAULT 0,
+            budget_hours REAL,
+            starts_on TEXT,
+            ends_on TEXT,
+            color TEXT,
+            created_ts REAL NOT NULL
+        );
+        INSERT INTO projects_new(id, name, client_id, status, billable, color, created_ts)
+            SELECT p.id, p.name,
+                (SELECT c.id FROM clients c JOIN projects parent ON parent.name = c.name WHERE parent.id = p.parent_id),
+                CASE WHEN p.archived THEN 'closed' ELSE 'active' END,
+                p.parent_id IS NOT NULL, p.color, p.created_ts
+            FROM projects p;
+        DROP TABLE projects;
+        ALTER TABLE projects_new RENAME TO projects;
+        CREATE UNIQUE INDEX projects_client_name ON projects(COALESCE(client_id, 0), name COLLATE NOCASE);
+
+        CREATE TABLE categories(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            billable INTEGER NOT NULL DEFAULT 1,
+            color TEXT,
+            archived INTEGER NOT NULL DEFAULT 0,
+            created_ts REAL NOT NULL
+        );
+        INSERT INTO categories(name, billable, created_ts) VALUES
+            ('Presales', 0, 0), ('Implementation', 1, 0), ('Meetings', 1, 0), ('Admin', 0, 0);
+        ALTER TABLE activities ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;
+        ALTER TABLE time_entries ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;
+
+        CREATE TABLE rules_new(
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+            category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+            field TEXT NOT NULL,
+            op TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_ts REAL NOT NULL,
+            CHECK (project_id IS NOT NULL OR category_id IS NOT NULL)
+        );
+        INSERT INTO rules_new(id, project_id, field, op, pattern, priority, created_ts)
+            SELECT id, project_id, field, op, pattern, priority, created_ts FROM rules;
+        DROP TABLE rules;
+        ALTER TABLE rules_new RENAME TO rules;
+        """,
     ]
 
     public init(path: String) throws {
@@ -107,9 +173,16 @@ public final class Store {
     private func migrate() throws {
         let version = Int(try db.query("PRAGMA user_version").first?.int("user_version") ?? 0)
         guard version < Self.migrations.count else { return }
+        // Table rebuilds need foreign keys off (they can't be toggled inside a
+        // transaction); integrity is checked before committing instead.
+        try db.execute("PRAGMA foreign_keys=OFF")
+        defer { try? db.execute("PRAGMA foreign_keys=ON") }
         try db.transaction {
             for (index, sql) in Self.migrations.enumerated() where index >= version {
                 try db.execute(sql)
+            }
+            if let violation = try db.query("PRAGMA foreign_key_check").first {
+                throw StoreError.invalid("migration broke a foreign key: \(violation.columns)")
             }
             try db.execute("PRAGMA user_version = \(Self.migrations.count)")
         }
@@ -125,89 +198,6 @@ public final class Store {
         try db.run(
             "INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [key, value])
-    }
-
-    // MARK: Projects
-
-    public func projects(includeArchived: Bool = false) throws -> [Project] {
-        let sql = "SELECT * FROM projects" + (includeArchived ? "" : " WHERE archived = 0") + " ORDER BY name"
-        return try db.query(sql).map(Self.project)
-    }
-
-    public func project(named name: String) throws -> Project? {
-        try db.query("SELECT * FROM projects WHERE name = ?", [name]).first.map(Self.project)
-    }
-
-    public func project(id: Int64) throws -> Project? {
-        try db.query("SELECT * FROM projects WHERE id = ?", [id]).first.map(Self.project)
-    }
-
-    /// Returns the existing project with this name, or creates it. An
-    /// existing project's color and parent are left alone.
-    @discardableResult
-    public func ensureProject(named name: String, color: String? = nil, parentID: Int64? = nil) throws -> Project {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw StoreError.invalid("project name is empty") }
-        if let existing = try project(named: trimmed) { return existing }
-        try db.run("INSERT INTO projects(name, parent_id, color, created_ts) VALUES(?, ?, ?, ?)",
-                   [trimmed, parentID, color, Date()])
-        return Project(id: db.lastInsertRowID, name: trimmed, parentID: parentID, color: color, archived: false)
-    }
-
-    /// Display path for every project, e.g. "Clients / Acme".
-    public func projectPaths() throws -> [Int64: String] {
-        let all = Dictionary(uniqueKeysWithValues: try projects(includeArchived: true).map { ($0.id, $0) })
-        return all.mapValues { project in
-            var names = [project.name]
-            var parent = project.parentID
-            // Parents are only set at creation, so there are no cycles; the cap is belt and braces.
-            while let id = parent, let p = all[id], names.count < 16 {
-                names.insert(p.name, at: 0)
-                parent = p.parentID
-            }
-            return names.joined(separator: " / ")
-        }
-    }
-
-    public func requireProject(named name: String) throws -> Project {
-        guard let project = try project(named: name) else { throw StoreError.notFound("project \"\(name)\"") }
-        return project
-    }
-
-    private static func project(_ row: Row) -> Project {
-        Project(
-            id: row.int("id")!, name: row.string("name")!, parentID: row.int("parent_id"),
-            color: row.string("color"), archived: row.int("archived") == 1)
-    }
-
-    // MARK: Rules
-
-    public func rules() throws -> [Rule] {
-        try db.query("SELECT * FROM rules ORDER BY priority DESC, id ASC").compactMap { row in
-            guard let field = RuleField(rawValue: row.string("field") ?? ""),
-                  let op = RuleOp(rawValue: row.string("op") ?? "")
-            else { return nil }
-            return Rule(
-                id: row.int("id")!, projectID: row.int("project_id")!, field: field, op: op,
-                pattern: row.string("pattern")!, priority: Int(row.int("priority") ?? 0))
-        }
-    }
-
-    @discardableResult
-    public func addRule(projectID: Int64, field: RuleField, op: RuleOp, pattern: String, priority: Int = 0) throws -> Rule {
-        if op == .regex {
-            do { _ = try NSRegularExpression(pattern: pattern) } catch {
-                throw StoreError.invalid("regex \"\(pattern)\" does not compile: \(error.localizedDescription)")
-            }
-        }
-        try db.run(
-            "INSERT INTO rules(project_id, field, op, pattern, priority, created_ts) VALUES(?, ?, ?, ?, ?, ?)",
-            [projectID, field.rawValue, op.rawValue, pattern, priority, Date()])
-        return Rule(id: db.lastInsertRowID, projectID: projectID, field: field, op: op, pattern: pattern, priority: priority)
-    }
-
-    public func deleteRule(id: Int64) throws {
-        guard try db.run("DELETE FROM rules WHERE id = ?", [id]) > 0 else { throw StoreError.notFound("rule \(id)") }
     }
 
     // MARK: Activities
@@ -248,12 +238,21 @@ public final class Store {
             [start, end, source, externalID, title, path, meta])
     }
 
-    /// Explicitly assigns spans to a project (or clears with nil). Returns rows changed.
+    /// Explicitly assigns spans to a project and/or category, overriding
+    /// rules. nil leaves a dimension alone; .some(nil) clears the override.
+    /// Returns rows changed.
     @discardableResult
-    public func assign(activityIDs: [Int64], projectID: Int64?) throws -> Int {
+    public func assign(activityIDs: [Int64], projectID: Int64?? = nil, categoryID: Int64?? = nil) throws -> Int {
         try db.transaction {
             try activityIDs.reduce(0) { total, id in
-                total + (try db.run("UPDATE activities SET project_id = ? WHERE id = ?", [projectID, id]))
+                var changed = 0
+                if let projectID {
+                    changed = try db.run("UPDATE activities SET project_id = ? WHERE id = ?", [projectID, id])
+                }
+                if let categoryID {
+                    changed = try db.run("UPDATE activities SET category_id = ? WHERE id = ?", [categoryID, id])
+                }
+                return total + changed
             }
         }
     }
@@ -281,6 +280,9 @@ public final class Store {
     public struct ActivityFilter {
         public var sources: [String]?
         public var projectID: Int64?
+        public var clientID: Int64?
+        public var categoryID: Int64?
+        /// Only activities with no project.
         public var uncategorizedOnly = false
         public var text: String?
         public var limit: Int?
@@ -288,7 +290,7 @@ public final class Store {
         public init() {}
     }
 
-    /// Spans overlapping `range`, with the effective project resolved.
+    /// Spans overlapping `range`, with project, category and client resolved.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter(), now: Date = Date()) throws -> [Activity] {
         var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, ?) > ?"
         var params: [SQLBindable] = [range.end, now, range.start]
@@ -303,15 +305,16 @@ public final class Store {
             params += Array(repeating: like as SQLBindable, count: 5)
         }
         sql += " ORDER BY start_ts"
-        let engine = RuleEngine(rules: try rules())
-        let names = try projectPaths()
+        let engine = RuleEngine(rules: try rules(), clients: try clients(includeArchived: true))
+        let lookup = try catalog()
         var result: [Activity] = []
         for row in try db.query(sql, params) {
             var activity = Self.activity(row)
-            activity.projectID = activity.assignedProjectID ?? engine.projectID(for: activity)
-            activity.project = activity.projectID.flatMap { names[$0] }
+            lookup.resolve(&activity, engine: engine)
             if filter.uncategorizedOnly && activity.projectID != nil { continue }
             if let projectID = filter.projectID, activity.projectID != projectID { continue }
+            if let clientID = filter.clientID, activity.clientID != clientID { continue }
+            if let categoryID = filter.categoryID, activity.categoryID != categoryID { continue }
             result.append(activity)
             if let limit = filter.limit, result.count >= limit { break }
         }
@@ -324,13 +327,13 @@ public final class Store {
             source: row.string("source")!, bundleID: row.string("bundle_id"), appName: row.string("app_name"),
             title: row.string("title"), url: row.string("url"), path: row.string("path"),
             externalID: row.string("external_id"), assignedProjectID: row.int("project_id"),
-            note: row.string("note"), meta: row.string("meta"), hidden: row.int("hidden") == 1)
+            assignedCategoryID: row.int("category_id"), note: row.string("note"), meta: row.string("meta"), hidden: row.int("hidden") == 1)
     }
 
     // MARK: Summaries
 
     public enum GroupBy: String, CaseIterable, Sendable {
-        case project, app, source, day
+        case project, client, category, app, source, day
     }
 
     public struct SummaryRow: Codable, Equatable, Sendable {
@@ -352,7 +355,9 @@ public final class Store {
             // Day grouping splits spans that cross midnight.
             var pieces: [(String, TimeInterval)] = []
             switch groupBy {
-            case .project: pieces = [(activity.project ?? "(uncategorized)", clipped.duration)]
+            case .project: pieces = [(activity.project ?? Self.noProject, clipped.duration)]
+            case .client: pieces = [(activity.client ?? Self.noClient, clipped.duration)]
+            case .category: pieces = [(activity.category ?? Self.noCategory, clipped.duration)]
             case .app: pieces = [(activity.appName ?? activity.source, clipped.duration)]
             case .source: pieces = [(activity.source, clipped.duration)]
             case .day: pieces = Self.splitByDay(clipped, calendar: calendar)
@@ -371,6 +376,10 @@ public final class Store {
 }
 
 extension Store {
+    static let noProject = "(no project)"
+    static let noClient = "(no client)"
+    static let noCategory = "(no category)"
+
     /// Splits an interval at local midnights, keyed "yyyy-MM-dd".
     static func splitByDay(_ interval: DateInterval, calendar: Calendar) -> [(String, TimeInterval)] {
         let formatter = DateFormatter()

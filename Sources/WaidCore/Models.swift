@@ -47,24 +47,82 @@ public struct Activity: Codable, Equatable, Sendable {
     public var externalID: String?
     /// Project explicitly assigned to this span; overrides rules.
     public var assignedProjectID: Int64?
+    /// Category explicitly assigned to this span; overrides rules.
+    public var assignedCategoryID: Int64?
     public var note: String?
     public var meta: String?
     /// Kept out of queries and reports (e.g. private browsing).
     public var hidden: Bool = false
 
-    /// Filled in by queries: the project from assignment or rules.
+    /// Filled in by queries: resolved from assignment, rules, or (for the
+    /// client) a client's domains.
     public var projectID: Int64?
     public var project: String?
+    public var categoryID: Int64?
+    public var category: String?
+    public var clientID: Int64?
+    public var client: String?
 
     public func duration(now: Date = Date()) -> TimeInterval {
         (end ?? now).timeIntervalSince(start)
     }
 }
 
+/// Who the work is for. Domains (acme.com) attribute matching URLs to the client.
+public struct Client: Codable, Equatable, Sendable {
+    public var id: Int64
+    public var name: String
+    public var domains: [String]
+    public var archived: Bool
+}
+
+public enum ProjectStatus: String, Codable, CaseIterable, Sendable {
+    /// Presales: the deal isn't won yet.
+    case prospect
+    case active
+    case closed
+}
+
+/// What the work is for. A project with a client is an engagement (usually
+/// with an hours budget); one without is internal.
 public struct Project: Codable, Equatable, Sendable {
     public var id: Int64
     public var name: String
-    public var parentID: Int64?
+    public var clientID: Int64?
+    /// Filled in on load.
+    public var client: String?
+    public var status: ProjectStatus
+    /// Whether time on this project is billable by default.
+    public var billable: Bool
+    public var budgetHours: Double?
+    /// Local dates, "yyyy-MM-dd".
+    public var startsOn: String?
+    public var endsOn: String?
+    public var color: String?
+
+    /// "Acme / Phase 2", or just the name for an internal project.
+    public var path: String { client.map { "\($0) / \(name)" } ?? name }
+}
+
+public struct ProjectChanges: Sendable {
+    public var name: String?
+    public var clientID: Int64??
+    public var status: ProjectStatus?
+    public var billable: Bool?
+    public var budgetHours: Double??
+    public var startsOn: String??
+    public var endsOn: String??
+    public var color: String??
+    public init() {}
+}
+
+/// The kind of work (presales, implementation, meetings), independent of
+/// what it's for.
+public struct Category: Codable, Equatable, Sendable {
+    public var id: Int64
+    public var name: String
+    /// false means never billable (e.g. presales), even on a billable project.
+    public var billable: Bool
     public var color: String?
     public var archived: Bool
 }
@@ -87,7 +145,11 @@ public enum RuleOp: String, Codable, CaseIterable, Sendable {
 
 public struct Rule: Codable, Equatable, Sendable {
     public var id: Int64
-    public var projectID: Int64
+    /// A rule sets the project, the category, or both. Each is resolved
+    /// independently, so "app is Zoom -> Meetings" and "title contains Acme
+    /// -> Acme" combine.
+    public var projectID: Int64?
+    public var categoryID: Int64?
     public var field: RuleField
     public var op: RuleOp
     public var pattern: String
@@ -118,6 +180,7 @@ public struct TimeEntry: Codable, Equatable, Sendable {
     /// nil while the timer is running.
     public var end: Date?
     public var projectID: Int64?
+    public var categoryID: Int64?
     public var title: String?
     public var notes: String?
     public var tags: [String]
@@ -127,8 +190,11 @@ public struct TimeEntry: Codable, Equatable, Sendable {
     public var author: String
     public var status: EntryStatus
 
-    /// Filled in by queries: the project's display path ("Clients / Acme").
+    /// Filled in by queries.
     public var project: String?
+    public var clientID: Int64?
+    public var client: String?
+    public var category: String?
 
     public func duration(now: Date = Date()) -> TimeInterval {
         (end ?? max(now, start)).timeIntervalSince(start)
@@ -139,29 +205,37 @@ public struct NewTimeEntry: Sendable {
     public var start: Date
     public var end: Date?
     public var projectID: Int64?
+    public var categoryID: Int64?
     public var title: String?
     public var notes: String?
     public var tags: [String] = []
-    public var billable = false
+    /// nil: derive from the project and category.
+    public var billable: Bool?
     public var origin: EntryOrigin
     public var author = "user"
     public var status = EntryStatus.confirmed
 
-    public init(start: Date, end: Date?, projectID: Int64? = nil, title: String? = nil, origin: EntryOrigin) {
+    public init(
+        start: Date, end: Date?, projectID: Int64? = nil, categoryID: Int64? = nil, title: String? = nil,
+        origin: EntryOrigin
+    ) {
         self.start = start
         self.end = end
         self.projectID = projectID
+        self.categoryID = categoryID
         self.title = title
         self.origin = origin
     }
 }
 
 /// Partial update. Double optionals distinguish "leave alone" (nil) from
-/// "clear" (.some(nil)).
+/// "clear" (.some(nil)). Changing the project or category without setting
+/// `billable` re-derives it.
 public struct TimeEntryChanges: Sendable {
     public var start: Date?
     public var end: Date??
     public var projectID: Int64??
+    public var categoryID: Int64??
     public var title: String??
     public var notes: String??
     public var tags: [String]?
