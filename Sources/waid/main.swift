@@ -14,7 +14,12 @@ let usage = """
     USAGE:
       waid daemon [--interval SECONDS]   Track the frontmost app/window (macOS) and import agent sessions
       waid mcp                           Run the MCP server on stdio
-      waid report [RANGE]                Time per project (RANGE: \(TimeRange.names.joined(separator: ", ")))
+      waid report [RANGE] [--entries|--unlogged]
+                                         Time per project: observed activities (default), confirmed
+                                         time entries, or activity not covered by any entry
+                                         (RANGE: \(TimeRange.names.joined(separator: ", ")))
+      waid start [PROJECT] [TITLE]       Start a timer (stops any running one)
+      waid stop                          Stop the running timer
       waid import [--full]               Import Claude Code sessions now
       waid status                        Show the current activity and timer
       waid db-path                       Print the database location
@@ -101,13 +106,23 @@ case "import":
 
 case "report":
     let (store, _) = openStore()
-    let name = args.first ?? "today"
+    let name = args.first { !$0.hasPrefix("--") } ?? "today"
     guard let range = TimeRange.named(name) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
+    func pad(_ s: String, _ n: Int) -> String { s.padding(toLength: n, withPad: " ", startingAt: 0) }
     do {
+        if args.contains("--entries") || args.contains("--unlogged") {
+            let rows = args.contains("--entries")
+                ? try store.entrySummary(in: range, groupBy: .project)
+                : try store.unloggedSummary(in: range, groupBy: .project)
+            guard !rows.isEmpty else { print("nothing \(args.contains("--entries") ? "logged" : "unlogged") \(name)"); break }
+            let width = max(12, rows.map(\.key.count).max() ?? 0)
+            print(pad("project", width) + "  time")
+            for row in rows { print(pad(row.key, width) + "  " + formatMinutes(row.seconds)) }
+            break
+        }
         let rows = try store.summary(in: range, groupBy: .project)
         let sources = Set(rows.flatMap { $0.secondsBySource.keys }).sorted()
         guard !rows.isEmpty else { print("nothing tracked \(name)"); break }
-        func pad(_ s: String, _ n: Int) -> String { s.padding(toLength: n, withPad: " ", startingAt: 0) }
         let width = max(12, rows.map(\.key.count).max() ?? 0)
         print(pad("project", width) + sources.map { "  " + pad($0, max(10, $0.count)) }.joined())
         for row in rows {
@@ -117,6 +132,29 @@ case "report":
         }
     } catch {
         fail("report failed: \(error)")
+    }
+
+case "start":
+    let (store, _) = openStore()
+    do {
+        let project = try args.first.map { try store.ensureProject(named: $0).id }
+        let title = args.count > 1 ? args.dropFirst().joined(separator: " ") : nil
+        let result = try store.startTimer(projectID: project, title: title)
+        if let stopped = result.stopped {
+            print("stopped \(stopped.project ?? "timer") after \(formatMinutes(stopped.duration()))")
+        }
+        print("started \(result.started.project ?? "timer")")
+    } catch {
+        fail("can't start timer: \(error)")
+    }
+
+case "stop":
+    let (store, _) = openStore()
+    do {
+        guard let stopped = try store.stopTimer() else { print("no timer running"); break }
+        print("stopped \(stopped.project ?? "timer") after \(formatMinutes(stopped.duration()))")
+    } catch {
+        fail("can't stop timer: \(error)")
     }
 
 case "status":

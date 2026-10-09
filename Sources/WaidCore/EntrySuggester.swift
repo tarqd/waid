@@ -1,0 +1,255 @@
+import Foundation
+
+/// Drafts time entries from categorized activities.
+///
+/// The range is cut into fixed buckets, and each bucket is labeled with the
+/// project that dominates it. Runs of the same label become blocks; short
+/// interruptions between two blocks of the same project are absorbed, short
+/// blocks are dropped, and time already covered by entries is cut out.
+public struct EntrySuggester: Sendable {
+    public var bucket: TimeInterval = 60
+    /// Same-project blocks this close together are merged, swallowing whatever was between them.
+    public var mergeGap: TimeInterval = 5 * 60
+    /// Blocks shorter than this are not suggested.
+    public var minDuration: TimeInterval = 10 * 60
+    /// Count agent sessions as the user's time. Off by default: agents work in
+    /// parallel, and their time isn't automatically the user's to claim.
+    public var includeAgents = false
+    /// A bucket needs at least this fraction of active time to get a label.
+    public var minActiveFraction = 0.5
+
+    public init() {}
+
+    public struct Evidence: Codable, Equatable, Sendable {
+        public var label: String
+        public var seconds: Double
+    }
+
+    public struct Block: Equatable, Sendable {
+        public var projectID: Int64
+        public var start: Date
+        public var end: Date
+        public var title: String?
+        /// The biggest contributors (titles or apps) by time.
+        public var evidence: [Evidence] = []
+    }
+
+    func eligible(_ activity: Activity) -> Bool {
+        includeAgents || !activity.source.hasPrefix(Source.agentPrefix)
+    }
+
+    /// The dominant project of each bucket, or nil when the bucket is idle,
+    /// uncategorized, or contested.
+    func labels(_ activities: [Activity], range: DateInterval) -> [Int64?] {
+        let count = Int((range.duration / bucket).rounded(.up))
+        guard count > 0 else { return [] }
+        var seconds = Array(repeating: [Int64: Double](), count: count)
+        for activity in activities where eligible(activity) {
+            let start = max(activity.start, range.start), end = min(activity.end ?? range.end, range.end)
+            guard end > start else { continue }
+            let key = activity.projectID ?? -1
+            var index = Int(start.timeIntervalSince(range.start) / bucket)
+            while index < count {
+                let bucketStart = range.start.addingTimeInterval(Double(index) * bucket)
+                let bucketEnd = min(bucketStart.addingTimeInterval(bucket), range.end)
+                guard bucketStart < end else { break }
+                seconds[index][key, default: 0] += min(end, bucketEnd).timeIntervalSince(max(start, bucketStart))
+                index += 1
+            }
+        }
+        return seconds.map { totals in
+            let active = totals.values.reduce(0, +)
+            guard active >= bucket * minActiveFraction,
+                  let best = totals.filter({ $0.key != -1 }).max(by: { $0.value < $1.value }),
+                  best.value >= active / 2
+            else { return nil }
+            return best.key
+        }
+    }
+
+    /// Suggested blocks in `range`, avoiding `occupied` intervals.
+    public func blocks(from activities: [Activity], in range: DateInterval, avoiding occupied: [DateInterval]) -> [Block] {
+        let labels = labels(activities, range: range)
+        func time(_ i: Int) -> Date { min(range.start.addingTimeInterval(Double(i) * bucket), range.end) }
+
+        // Runs of identical labels.
+        var runs: [Block] = []
+        for (i, label) in labels.enumerated() {
+            guard let label else { continue }
+            if var last = runs.last, last.projectID == label, last.end == time(i) {
+                last.end = time(i + 1)
+                runs[runs.count - 1] = last
+            } else {
+                runs.append(Block(projectID: label, start: time(i), end: time(i + 1)))
+            }
+        }
+
+        // Merge same-project runs across short gaps, absorbing a short
+        // interruption by another project (A, brief B, A -> one A block).
+        var merged: [Block] = []
+        for run in runs {
+            if var last = merged.last, last.projectID == run.projectID,
+               run.start.timeIntervalSince(last.end) <= mergeGap {
+                last.end = run.end
+                merged[merged.count - 1] = last
+            } else if merged.count >= 2, merged[merged.count - 2].projectID == run.projectID,
+                      run.start.timeIntervalSince(merged[merged.count - 2].end) <= mergeGap {
+                merged.removeLast()
+                merged[merged.count - 1].end = run.end
+            } else {
+                merged.append(run)
+            }
+        }
+
+        // Cut out time already claimed by entries, then drop what's too short.
+        let free = merged.flatMap { block in
+            Self.subtract(occupied, from: DateInterval(start: block.start, end: block.end)).map {
+                Block(projectID: block.projectID, start: $0.start, end: $0.end)
+            }
+        }
+        return free.filter { $0.end.timeIntervalSince($0.start) >= minDuration }.map { block in
+            var block = block
+            block.evidence = evidence(for: block, from: activities)
+            block.title = Self.title(from: block.evidence)
+            return block
+        }
+    }
+
+    private func evidence(for block: Block, from activities: [Activity]) -> [Evidence] {
+        var totals: [String: Double] = [:]
+        for activity in activities where eligible(activity) && activity.projectID == block.projectID {
+            let overlap = min(activity.end ?? block.end, block.end).timeIntervalSince(max(activity.start, block.start))
+            guard overlap > 0 else { continue }
+            let label = activity.title ?? activity.appName ?? activity.source
+            totals[label, default: 0] += overlap
+        }
+        let all = totals.map { Evidence(label: $0.key, seconds: $0.value) }
+        let ranked = all.sorted { a, b in a.seconds != b.seconds ? a.seconds > b.seconds : a.label < b.label }
+        return Array(ranked.prefix(5))
+    }
+
+    /// The top title, plus the runner-up when it's a substantial share.
+    static func title(from evidence: [Evidence]) -> String? {
+        guard let first = evidence.first else { return nil }
+        var title = first.label
+        if evidence.count > 1, evidence[1].seconds >= first.seconds / 4 { title += " · " + evidence[1].label }
+        return title.count <= 100 ? title : String(title.prefix(99)) + "…"
+    }
+
+    static func subtract(_ occupied: [DateInterval], from interval: DateInterval) -> [DateInterval] {
+        var pieces = [interval]
+        for hole in occupied {
+            pieces = pieces.flatMap { piece -> [DateInterval] in
+                guard hole.start < piece.end, hole.end > piece.start else { return [piece] }
+                var out: [DateInterval] = []
+                if hole.start > piece.start { out.append(DateInterval(start: piece.start, end: hole.start)) }
+                if hole.end < piece.end { out.append(DateInterval(start: hole.end, end: piece.end)) }
+                return out
+            }
+        }
+        return pieces
+    }
+}
+
+extension Store {
+    public struct Suggestion: Sendable {
+        public var entry: TimeEntry
+        public var evidence: [EntrySuggester.Evidence]
+    }
+
+    /// Replaces earlier suggested drafts in `range` with fresh ones. Confirmed
+    /// entries and drafts the user created are left alone and never overlapped.
+    public func suggestEntries(
+        in range: DateInterval, using suggester: EntrySuggester = EntrySuggester(),
+        author: String = "user", now: Date = Date()
+    ) throws -> [Suggestion] {
+        let range = DateInterval(start: range.start, end: max(range.start, min(range.end, now)))
+        return try db.transaction {
+            try db.run(
+                "DELETE FROM time_entries WHERE origin = ? AND status = ? AND start_ts < ? AND end_ts > ?",
+                [EntryOrigin.suggested.rawValue, EntryStatus.draft.rawValue, range.end, range.start])
+            let occupied = try timeEntries(in: range, now: now).map {
+                DateInterval(start: $0.start, end: max($0.start, $0.end ?? now))
+            }
+            let blocks = suggester.blocks(from: try activities(in: range, now: now), in: range, avoiding: occupied)
+            return try blocks.map { block in
+                var new = NewTimeEntry(start: block.start, end: block.end, projectID: block.projectID,
+                                       title: block.title, origin: .suggested)
+                new.status = .draft
+                new.author = author
+                return Suggestion(entry: try insertEntry(new, now: now), evidence: block.evidence)
+            }
+        }
+    }
+
+    public struct EntrySummaryRow: Codable, Equatable, Sendable {
+        public var key: String
+        public var seconds: Double
+        public var billableSeconds: Double
+    }
+
+    /// Confirmed entry time grouped by project or day (drafts optional).
+    public func entrySummary(
+        in range: DateInterval, groupBy: GroupBy, includeDrafts: Bool = false, projectID: Int64? = nil,
+        calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [EntrySummaryRow] {
+        guard groupBy == .project || groupBy == .day else {
+            throw StoreError.invalid("time entries can be grouped by project or day, not \(groupBy.rawValue)")
+        }
+        var filter = EntryFilter()
+        filter.projectID = projectID
+        if !includeDrafts { filter.status = .confirmed }
+        var totals: [String: (Double, Double)] = [:]
+        for entry in try timeEntries(in: range, filter: filter, now: now) {
+            let start = max(entry.start, range.start)
+            let clipped = DateInterval(start: start, end: max(start, min(entry.end ?? max(now, entry.start), range.end)))
+            let pieces = groupBy == .day
+                ? Self.splitByDay(clipped, calendar: calendar)
+                : [(entry.project ?? "(no project)", clipped.duration)]
+            for (key, seconds) in pieces where seconds > 0 {
+                var t = totals[key] ?? (0, 0)
+                t.0 += seconds
+                if entry.billable { t.1 += seconds }
+                totals[key] = t
+            }
+        }
+        return Self.sorted(totals.map { EntrySummaryRow(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
+                           byKey: groupBy == .day)
+    }
+
+    /// Categorized activity time that no confirmed entry covers: work that
+    /// happened but hasn't been logged.
+    public func unloggedSummary(
+        in range: DateInterval, groupBy: GroupBy, using suggester: EntrySuggester = EntrySuggester(),
+        calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [EntrySummaryRow] {
+        guard groupBy == .project || groupBy == .day else {
+            throw StoreError.invalid("unlogged time can be grouped by project or day, not \(groupBy.rawValue)")
+        }
+        let range = DateInterval(start: range.start, end: max(range.start, min(range.end, now)))
+        var filter = EntryFilter()
+        filter.status = .confirmed
+        let covered = try timeEntries(in: range, filter: filter, now: now).map {
+            DateInterval(start: $0.start, end: max($0.start, $0.end ?? now))
+        }
+        let paths = try projectPaths()
+        let labels = suggester.labels(try activities(in: range, now: now), range: range)
+        var totals: [String: Double] = [:]
+        for (i, label) in labels.enumerated() {
+            guard let label else { continue }
+            let start = range.start.addingTimeInterval(Double(i) * suggester.bucket)
+            let bucket = DateInterval(start: start, end: min(start.addingTimeInterval(suggester.bucket), range.end))
+            for piece in EntrySuggester.subtract(covered, from: bucket) {
+                let pieces = groupBy == .day ? Self.splitByDay(piece, calendar: calendar)
+                    : [(paths[label] ?? "#\(label)", piece.duration)]
+                for (key, seconds) in pieces { totals[key, default: 0] += seconds }
+            }
+        }
+        return Self.sorted(totals.map { EntrySummaryRow(key: $0.key, seconds: $0.value, billableSeconds: 0) },
+                           byKey: groupBy == .day)
+    }
+
+    private static func sorted(_ rows: [EntrySummaryRow], byKey: Bool) -> [EntrySummaryRow] {
+        rows.sorted { byKey ? $0.key < $1.key : ($0.seconds, $1.key) > ($1.seconds, $0.key) }
+    }
+}

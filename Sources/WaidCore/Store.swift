@@ -3,11 +3,13 @@ import Foundation
 public enum StoreError: Error, CustomStringConvertible, Equatable {
     case notFound(String)
     case invalid(String)
+    case overlap(String)
 
     public var description: String {
         switch self {
         case .notFound(let what): return "not found: \(what)"
         case .invalid(let why): return "invalid: \(why)"
+        case .overlap(let why): return "overlap: \(why)"
         }
     }
 }
@@ -16,7 +18,7 @@ public enum StoreError: Error, CustomStringConvertible, Equatable {
 public final class Store {
     public let db: Database
 
-    private static let migrations: [String] = [
+    static let migrations: [String] = [
         """
         CREATE TABLE projects(
             id INTEGER PRIMARY KEY,
@@ -53,7 +55,32 @@ public final class Store {
             created_ts REAL NOT NULL
         );
         CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """,
+        // Split claimed time (time entries) from observed time (activities).
         """
+        ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id) ON DELETE SET NULL;
+        ALTER TABLE activities ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE time_entries(
+            id INTEGER PRIMARY KEY,
+            start_ts REAL NOT NULL,
+            end_ts REAL,
+            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+            title TEXT,
+            notes TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            billable INTEGER NOT NULL DEFAULT 0,
+            origin TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT 'user',
+            status TEXT NOT NULL DEFAULT 'confirmed',
+            created_ts REAL NOT NULL,
+            updated_ts REAL NOT NULL
+        );
+        CREATE INDEX time_entries_start ON time_entries(start_ts);
+        INSERT INTO time_entries(start_ts, end_ts, project_id, notes, origin, created_ts, updated_ts)
+            SELECT start_ts, end_ts, project_id, note, source, start_ts, COALESCE(end_ts, start_ts)
+            FROM activities WHERE source IN ('timer', 'manual');
+        DELETE FROM activities WHERE source IN ('timer', 'manual');
+        """,
     ]
 
     public init(path: String) throws {
@@ -115,14 +142,31 @@ public final class Store {
         try db.query("SELECT * FROM projects WHERE id = ?", [id]).first.map(Self.project)
     }
 
-    /// Returns the existing project with this name, or creates it.
+    /// Returns the existing project with this name, or creates it. An
+    /// existing project's color and parent are left alone.
     @discardableResult
-    public func ensureProject(named name: String, color: String? = nil) throws -> Project {
+    public func ensureProject(named name: String, color: String? = nil, parentID: Int64? = nil) throws -> Project {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw StoreError.invalid("project name is empty") }
         if let existing = try project(named: trimmed) { return existing }
-        try db.run("INSERT INTO projects(name, color, created_ts) VALUES(?, ?, ?)", [trimmed, color, Date()])
-        return Project(id: db.lastInsertRowID, name: trimmed, color: color, archived: false)
+        try db.run("INSERT INTO projects(name, parent_id, color, created_ts) VALUES(?, ?, ?, ?)",
+                   [trimmed, parentID, color, Date()])
+        return Project(id: db.lastInsertRowID, name: trimmed, parentID: parentID, color: color, archived: false)
+    }
+
+    /// Display path for every project, e.g. "Clients / Acme".
+    public func projectPaths() throws -> [Int64: String] {
+        let all = Dictionary(uniqueKeysWithValues: try projects(includeArchived: true).map { ($0.id, $0) })
+        return all.mapValues { project in
+            var names = [project.name]
+            var parent = project.parentID
+            // Parents are only set at creation, so there are no cycles; the cap is belt and braces.
+            while let id = parent, let p = all[id], names.count < 16 {
+                names.insert(p.name, at: 0)
+                parent = p.parentID
+            }
+            return names.joined(separator: " / ")
+        }
     }
 
     public func requireProject(named name: String) throws -> Project {
@@ -132,8 +176,8 @@ public final class Store {
 
     private static func project(_ row: Row) -> Project {
         Project(
-            id: row.int("id")!, name: row.string("name")!, color: row.string("color"),
-            archived: row.int("archived") == 1)
+            id: row.int("id")!, name: row.string("name")!, parentID: row.int("parent_id"),
+            color: row.string("color"), archived: row.int("archived") == 1)
     }
 
     // MARK: Rules
@@ -218,11 +262,14 @@ public final class Store {
         try db.query("SELECT * FROM activities WHERE id = ?", [id]).first.map(Self.activity)
     }
 
-    public func runningTimer() throws -> Activity? {
-        try db.query(
-            "SELECT * FROM activities WHERE source = ? AND end_ts IS NULL ORDER BY start_ts DESC LIMIT 1",
-            [Source.timer]
-        ).first.map(Self.activity)
+    /// Hides spans from queries and reports, or unhides them. Returns rows changed.
+    @discardableResult
+    public func setHidden(activityIDs: [Int64], hidden: Bool) throws -> Int {
+        try db.transaction {
+            try activityIDs.reduce(0) { total, id in
+                total + (try db.run("UPDATE activities SET hidden = ? WHERE id = ?", [hidden, id]))
+            }
+        }
     }
 
     public func latestActivity(source: String) throws -> Activity? {
@@ -237,6 +284,7 @@ public final class Store {
         public var uncategorizedOnly = false
         public var text: String?
         public var limit: Int?
+        public var includeHidden = false
         public init() {}
     }
 
@@ -244,6 +292,7 @@ public final class Store {
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter(), now: Date = Date()) throws -> [Activity] {
         var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, ?) > ?"
         var params: [SQLBindable] = [range.end, now, range.start]
+        if !filter.includeHidden { sql += " AND hidden = 0" }
         if let sources = filter.sources, !sources.isEmpty {
             sql += " AND source IN (" + sources.map { _ in "?" }.joined(separator: ",") + ")"
             params += sources.map { $0 as SQLBindable }
@@ -255,7 +304,7 @@ public final class Store {
         }
         sql += " ORDER BY start_ts"
         let engine = RuleEngine(rules: try rules())
-        let names = Dictionary(uniqueKeysWithValues: try projects(includeArchived: true).map { ($0.id, $0.name) })
+        let names = try projectPaths()
         var result: [Activity] = []
         for row in try db.query(sql, params) {
             var activity = Self.activity(row)
@@ -275,7 +324,7 @@ public final class Store {
             source: row.string("source")!, bundleID: row.string("bundle_id"), appName: row.string("app_name"),
             title: row.string("title"), url: row.string("url"), path: row.string("path"),
             externalID: row.string("external_id"), assignedProjectID: row.int("project_id"),
-            note: row.string("note"), meta: row.string("meta"))
+            note: row.string("note"), meta: row.string("meta"), hidden: row.int("hidden") == 1)
     }
 
     // MARK: Summaries
@@ -296,10 +345,6 @@ public final class Store {
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> [SummaryRow] {
         var totals: [String: [String: Double]] = [:]
-        let dayFormatter = DateFormatter()
-        dayFormatter.calendar = calendar
-        dayFormatter.timeZone = calendar.timeZone
-        dayFormatter.dateFormat = "yyyy-MM-dd"
         for activity in try activities(in: range, filter: filter, now: now) {
             let clipped = DateInterval(
                 start: max(activity.start, range.start),
@@ -310,14 +355,7 @@ public final class Store {
             case .project: pieces = [(activity.project ?? "(uncategorized)", clipped.duration)]
             case .app: pieces = [(activity.appName ?? activity.source, clipped.duration)]
             case .source: pieces = [(activity.source, clipped.duration)]
-            case .day:
-                var cursor = clipped.start
-                while cursor < clipped.end {
-                    let dayEnd = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: cursor))!
-                    let pieceEnd = min(dayEnd, clipped.end)
-                    pieces.append((dayFormatter.string(from: cursor), pieceEnd.timeIntervalSince(cursor)))
-                    cursor = pieceEnd
-                }
+            case .day: pieces = Self.splitByDay(clipped, calendar: calendar)
             }
             for (key, seconds) in pieces where seconds > 0 {
                 totals[key, default: [:]][activity.source, default: 0] += seconds
@@ -329,5 +367,25 @@ public final class Store {
                 groupBy == .day ? $0.key < $1.key
                     : $0.secondsBySource.values.reduce(0, +) > $1.secondsBySource.values.reduce(0, +)
             }
+    }
+}
+
+extension Store {
+    /// Splits an interval at local midnights, keyed "yyyy-MM-dd".
+    static func splitByDay(_ interval: DateInterval, calendar: Calendar) -> [(String, TimeInterval)] {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        var pieces: [(String, TimeInterval)] = []
+        var cursor = interval.start
+        while cursor < interval.end {
+            let dayEnd = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: cursor))!
+            let pieceEnd = min(dayEnd, interval.end)
+            pieces.append((formatter.string(from: cursor), pieceEnd.timeIntervalSince(cursor)))
+            cursor = pieceEnd
+        }
+        return pieces
     }
 }

@@ -81,8 +81,9 @@ final class MCPServerTests: XCTestCase {
     }
 
     func testTimersAndAgentWork() throws {
-        let started = try call("start_timer", ["project": "Writing", "note": "blog"])
-        XCTAssertEqual(started["project"], "Writing")
+        let started = try call("start_timer", ["project": "Writing", "title": "blog"])
+        XCTAssertEqual(started["started"]?["project"], "Writing")
+        XCTAssertEqual(started["started"]?["origin"], "timer")
         now += 600
         XCTAssertEqual(try call("get_status")["running_timer"]?["minutes"], 10)
         XCTAssertEqual(try call("stop_timer")["minutes"], 10)
@@ -101,5 +102,40 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(spans.count, 1, "same external_id updates instead of duplicating")
 
         _ = try call("record_agent_work", ["agent": "bad name!", "start": "2026-10-09", "title": "x"], expectError: true)
+    }
+
+    func testSuggestEditConfirmFlowAttributesAgent() throws {
+        _ = try send(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Claude Code","version":"2"}}}"#)
+        let t = TimeRange.parseDate("2026-10-09T09:00:00Z")!
+        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode", title: "Store.swift", path: "/src/waid/Store.swift"))
+        _ = try call("create_rule", ["project": "waid", "field": "path", "op": "prefix", "pattern": "/src/waid"])
+
+        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "unlogged"])["groups"],
+                       [["key": "waid", "minutes": 60]])
+
+        let suggested = try call("suggest_time_entries", ["range": "today"])
+        guard case .array(let drafts) = suggested, drafts.count == 1, let draft = drafts.first?["entry"] else {
+            return XCTFail("\(suggested)")
+        }
+        XCTAssertEqual(draft["status"], "draft")
+        XCTAssertEqual(draft["author"], "agent:claude-code")
+        XCTAssertEqual(draft["title"], "Store.swift")
+        XCTAssertEqual(drafts.first?["evidence"], [["label": "Store.swift", "minutes": 60]])
+        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "entries"])["groups"], [])
+
+        let id = try XCTUnwrap(draft["id"])
+        let updated = try call("update_time_entry", ["id": id, "title": "Store refactor", "billable": true])
+        XCTAssertEqual(updated["title"], "Store refactor")
+        XCTAssertEqual(try call("confirm_time_entries", ["ids": [id]])["confirmed"], 1)
+
+        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "entries"])["groups"],
+                       [["key": "waid", "minutes": 60, "billable_minutes": 60]])
+        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "unlogged"])["groups"], [])
+
+        let overlap = try call("create_time_entry", ["start": "2026-10-09T09:30:00Z", "end": "2026-10-09T10:30:00Z"],
+                               expectError: true)
+        XCTAssertTrue(overlap.stringValue?.contains("can't overlap") == true, "\(overlap)")
+        _ = try call("summarize", ["kind": "entries", "group_by": "app"], expectError: true)
     }
 }

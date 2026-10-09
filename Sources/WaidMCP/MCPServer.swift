@@ -67,17 +67,32 @@ public struct Arguments {
     }
 }
 
+/// Who is calling, taken from the client's `initialize` request.
+public struct CallContext: Sendable {
+    public var clientName: String?
+
+    /// Author label for anything this call writes: "agent:<client>", or
+    /// "agent:unknown" for a client that didn't introduce itself.
+    public var author: String {
+        let name = (clientName ?? "unknown").lowercased()
+            .replacingOccurrences(of: "[^a-z0-9._-]+", with: "-", options: .regularExpression)
+        return "agent:" + name
+    }
+
+    public init(clientName: String? = nil) { self.clientName = clientName }
+}
+
 public struct Tool {
     public var name: String
     public var description: String
     public var inputSchema: JSONValue
     public var readOnly: Bool
     public var destructive: Bool
-    public var handler: (Arguments) throws -> Encodable
+    public var handler: (Arguments, CallContext) throws -> Encodable
 
     public init(
         name: String, description: String, inputSchema: JSONValue, readOnly: Bool = false,
-        destructive: Bool = false, handler: @escaping (Arguments) throws -> Encodable
+        destructive: Bool = false, handler: @escaping (Arguments, CallContext) throws -> Encodable
     ) {
         self.name = name
         self.description = description
@@ -99,6 +114,7 @@ public final class MCPServer {
     public let instructions: String?
     private let tools: [Tool]
     private let toolsByName: [String: Tool]
+    public private(set) var context = CallContext()
 
     public init(name: String, version: String, instructions: String? = nil, tools: [Tool]) {
         self.name = name
@@ -138,6 +154,7 @@ public final class MCPServer {
 
         switch method {
         case "initialize":
+            context.clientName = params["clientInfo"]?["name"]?.stringValue
             let requested = params["protocolVersion"]?.stringValue
             let version = requested.flatMap { Self.supportedProtocolVersions.contains($0) ? $0 : nil }
                 ?? Self.supportedProtocolVersions[0]
@@ -167,7 +184,7 @@ public final class MCPServer {
 
     private func call(_ tool: Tool, arguments: [String: JSONValue]) -> JSONValue {
         do {
-            let output = try tool.handler(Arguments(arguments))
+            let output = try tool.handler(Arguments(arguments), context)
             let text: String
             if let string = output as? String {
                 text = string
