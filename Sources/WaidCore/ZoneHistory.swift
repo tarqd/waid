@@ -30,9 +30,9 @@ extension Store {
     /// The zone you were in at `date`, per the zone history. Time before the
     /// first record is in the first recorded zone; nil only when nothing has
     /// been recorded yet.
-    public func zone(at date: Date) throws -> TimeZone? {
+    func zone(at date: Date) throws -> TimeZone? {
         let history = try zoneHistory()
-        return history.isEmpty ? nil : TimeAccounting.LocalDates(history: history, fallback: .current).zone(at: date)
+        return (history.last { $0.effectiveFrom <= date } ?? history.first)?.zone
     }
 
     /// `calendar` set to the zone you were in at `now`, for resolving "today"
@@ -45,13 +45,16 @@ extension Store {
 
     /// The instants `range` covers: exactly its instants, or the times whose
     /// local date, per the zone history, falls in its dates. Disjoint, in order.
-    public func intervals(_ range: ReportRange, calendar: Calendar = .current) throws -> [DateInterval] {
+    func intervals(_ range: ReportRange, calendar: Calendar = .current) throws -> [DateInterval] {
         try localDates(fallback: calendar).intervals(range)
     }
 
-    /// One interval spanning all of `range`'s instants, for listing the spans in it.
-    public func interval(covering range: ReportRange, calendar: Calendar = .current) throws -> DateInterval {
-        TimeAccounting.hull(try intervals(range, calendar: calendar)) ?? DateInterval(start: Date(timeIntervalSince1970: 0), duration: 0)
+    /// The first and last instants `range` covers, for echoing its bounds
+    /// back to the caller; nil when it covers none. Spans are selected by
+    /// `range` itself, never by these bounds: a repeated local date leaves a
+    /// gap between them that belongs to another date.
+    public func bounds(of range: ReportRange, calendar: Calendar = .current) throws -> DateInterval? {
+        TimeAccounting.hull(try intervals(range, calendar: calendar))
     }
 
     /// Local dates per the zone history, falling back to `calendar`'s zone

@@ -136,7 +136,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(draft["status"], "draft")
         XCTAssertEqual(draft["author"], "agent:claude-code")
         XCTAssertEqual(draft["title"], "Store.swift")
-        XCTAssertEqual(drafts.first?["evidence"], [["label": "Store.swift", "minutes": 60]])
+        XCTAssertEqual(drafts.first?["contributors"], [["label": "Store.swift", "minutes": 60]])
         XCTAssertEqual(try call("summarize", ["range": "today"])["groups"], [], "drafts excluded by default")
         XCTAssertEqual(try call("summarize", ["range": "today", "include_drafts": true])["groups"],
                        [["key": "waid", "minutes": 60, "billable_minutes": 0]])

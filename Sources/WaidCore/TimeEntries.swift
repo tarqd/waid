@@ -56,6 +56,23 @@ extension Store {
         return try db.query(sql + " ORDER BY start_ts", params).map { Self.timeEntry($0, catalog: catalog) }
     }
 
+    /// Entries with time on `range`'s local dates (or in its instants), oldest
+    /// first. When a local date repeats, entries in the gap between its
+    /// stretches are left out.
+    public func timeEntries(
+        in range: ReportRange, filter: EntryFilter = EntryFilter(), calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [TimeEntry] {
+        try timeEntries(overlapping: try intervals(range, calendar: calendar), filter: filter, now: now)
+    }
+
+    /// Entries overlapping any of `intervals`, oldest first.
+    func timeEntries(overlapping intervals: [DateInterval], filter: EntryFilter, now: Date) throws -> [TimeEntry] {
+        guard let hull = TimeAccounting.hull(intervals) else { return [] }
+        return try timeEntries(in: hull, filter: filter, now: now).filter {
+            TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
+        }
+    }
+
     public func runningEntry() throws -> TimeEntry? {
         guard let row = try db.query("SELECT * FROM time_entries WHERE end_ts IS NULL ORDER BY start_ts DESC LIMIT 1").first
         else { return nil }

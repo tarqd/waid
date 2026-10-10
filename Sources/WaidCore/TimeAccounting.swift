@@ -1,21 +1,24 @@
 import Foundation
 
 /// The time-accounting rules every report shares: how a span is clipped to a
-/// range, how it is split into days, which key it is grouped under, and how
-/// grouped totals are ordered. Reports pick their spans and hand them here.
+/// range, how it is split into days, which key it is grouped under, how its
+/// seconds and billable seconds are totalled, and how grouped totals are
+/// ordered. Reports pick their spans and hand them here.
 ///
 /// Internal to WaidCore: callers use the Store's report functions.
 enum TimeAccounting {
     static let noProject = "(no project)"
     static let noClient = "(no client)"
     static let noCategory = "(no category)"
+    static let noSource = "(no source)"
 
     /// The range for all-time reports such as budget status.
     static let allTime = DateInterval(start: .distantPast, end: .distantFuture)
 
-    /// What a span can be grouped by. A nil project, client or category falls
-    /// under the matching "(no …)" key.
-    struct Labels {
+    /// The keys a span can be grouped under. A nil project, client or
+    /// category falls under the matching "(no …)" key; a nil app under the
+    /// source, and a nil source under "(no source)".
+    struct GroupKeys {
         var project: String?
         var client: String?
         var category: String?
@@ -41,6 +44,12 @@ enum TimeAccounting {
         intervals.map { clip(start: start, end: end, to: $0, now: now) }.filter { $0.duration > 0 }
     }
 
+    /// Whether a span overlaps any of `intervals`, ending as `end(start:end:now:)` says.
+    static func overlaps(start: Date, end: Date?, _ intervals: [DateInterval], now: Date) -> Bool {
+        let spanEnd = self.end(start: start, end: end, now: now)
+        return intervals.contains { start < $0.end && spanEnd > $0.start }
+    }
+
     /// The smallest interval holding all of `intervals`, for picking spans to clip.
     static func hull(_ intervals: [DateInterval]) -> DateInterval? {
         guard let first = intervals.first, let last = intervals.last else { return nil }
@@ -50,15 +59,45 @@ enum TimeAccounting {
     /// The keyed pieces of `interval` under `groupBy`. Day grouping splits by
     /// local date; every other grouping yields a single piece.
     static func pieces(
-        of interval: DateInterval, groupBy: Store.GroupBy, labels: Labels, dates: LocalDates
+        of interval: DateInterval, groupBy: Store.GroupBy, keys: GroupKeys, dates: LocalDates
     ) -> [(key: String, seconds: TimeInterval)] {
         switch groupBy {
         case .day: return dates.split(interval)
-        case .project: return [(labels.project ?? noProject, interval.duration)]
-        case .client: return [(labels.client ?? noClient, interval.duration)]
-        case .category: return [(labels.category ?? noCategory, interval.duration)]
-        case .app: return [(labels.app ?? labels.source ?? "", interval.duration)]
-        case .source: return [(labels.source ?? "", interval.duration)]
+        case .project: return [(keys.project ?? noProject, interval.duration)]
+        case .client: return [(keys.client ?? noClient, interval.duration)]
+        case .category: return [(keys.category ?? noCategory, interval.duration)]
+        case .app: return [(keys.app ?? keys.source ?? noSource, interval.duration)]
+        case .source: return [(keys.source ?? noSource, interval.duration)]
+        }
+    }
+
+    /// Exact seconds and their billable part.
+    struct Total: Equatable {
+        var seconds: Double = 0
+        var billableSeconds: Double = 0
+    }
+
+    /// Totals per key in exact seconds, with the billable split. Every report
+    /// accumulates through one of these and rounds only for display.
+    struct Tally<Key: Hashable> {
+        private(set) var totals: [Key: Total] = [:]
+
+        subscript(key: Key) -> Total { totals[key] ?? Total() }
+
+        mutating func add(_ seconds: TimeInterval, to key: Key, billable: Bool = false) {
+            guard seconds > 0 else { return }
+            totals[key, default: Total()].seconds += seconds
+            if billable { totals[key, default: Total()].billableSeconds += seconds }
+        }
+
+        /// Adds the keyed pieces of `interval` under `groupBy`, each stored under `key(piece key)`.
+        mutating func add(
+            _ interval: DateInterval, groupBy: Store.GroupBy, keys: GroupKeys, dates: LocalDates,
+            billable: Bool = false, as key: (String) -> Key
+        ) {
+            for (piece, seconds) in pieces(of: interval, groupBy: groupBy, keys: keys, dates: dates) {
+                add(seconds, to: key(piece), billable: billable)
+            }
         }
     }
 
@@ -78,9 +117,10 @@ enum TimeAccounting {
         /// A run of local dates is usually one interval, but flying west can
         /// repeat a date, and then it is more than one.
         func intervals(_ range: ReportRange) -> [DateInterval] {
-            guard case .localDates(let dates) = range else {
-                if case .instants(let interval) = range { return [interval] }
-                return []
+            let dates: ClosedRange<LocalDate>
+            switch range {
+            case .instants(let interval): return [interval]
+            case .localDates(let localDates): dates = localDates
             }
             // Each zone holds from its change until the next; the first also covers all earlier time.
             let zones = history.isEmpty ? [ZoneChange(zone: fallback, effectiveFrom: .distantPast)] : history
@@ -133,5 +173,21 @@ enum TimeAccounting {
         rows.sorted { a, b in
             groupBy == .day ? key(a) < key(b) : (seconds(a), key(b)) > (seconds(b), key(a))
         }
+    }
+}
+
+extension TimeAccounting.Tally where Key == String {
+    mutating func add(
+        _ interval: DateInterval, groupBy: Store.GroupBy, keys: TimeAccounting.GroupKeys,
+        dates: TimeAccounting.LocalDates, billable: Bool = false
+    ) {
+        add(interval, groupBy: groupBy, keys: keys, dates: dates, billable: billable) { $0 }
+    }
+
+    /// The totals as report groups, in report order.
+    func groups(_ groupBy: Store.GroupBy) -> [Store.TimeGroup] {
+        TimeAccounting.sorted(
+            totals.map { Store.TimeGroup(key: $0.key, seconds: $0.value.seconds, billableSeconds: $0.value.billableSeconds) },
+            groupBy: groupBy, key: \.key, seconds: \.seconds)
     }
 }

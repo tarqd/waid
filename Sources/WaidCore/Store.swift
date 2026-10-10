@@ -330,6 +330,26 @@ public final class Store {
         return result
     }
 
+    /// Spans with time on `range`'s local dates (or in its instants), oldest
+    /// first, with project, category and client resolved. When a local date
+    /// repeats, spans in the gap between its stretches are left out.
+    public func activities(
+        in range: ReportRange, filter: ActivityFilter = ActivityFilter(), calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [Activity] {
+        try activities(overlapping: try intervals(range, calendar: calendar), filter: filter, now: now)
+    }
+
+    /// Spans overlapping any of `intervals`, oldest first.
+    func activities(overlapping intervals: [DateInterval], filter: ActivityFilter, now: Date) throws -> [Activity] {
+        guard let hull = TimeAccounting.hull(intervals) else { return [] }
+        var unlimited = filter
+        unlimited.limit = nil
+        let spans = try activities(in: hull, filter: unlimited, now: now).filter {
+            TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
+        }
+        return filter.limit.map { Array(spans.prefix($0)) } ?? spans
+    }
+
     private static func activity(_ row: Row) -> Activity {
         Activity(
             id: row.int("id")!, start: row.date("start_ts")!, end: row.date("end_ts"),
@@ -359,35 +379,21 @@ public final class Store {
         in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> [EvidenceRow] {
+        struct Key: Hashable { var key: String; var source: String }
         let dates = try localDates(fallback: calendar)
         let intervals = dates.intervals(range)
-        var totals: [String: [String: Double]] = [:]
-        for activity in try TimeAccounting.hull(intervals).map({ try activities(in: $0, filter: filter, now: now) }) ?? [] {
-            let labels = TimeAccounting.Labels(project: activity.project, client: activity.client,
-                                               category: activity.category, app: activity.appName, source: activity.source)
+        var tally = TimeAccounting.Tally<Key>()
+        for activity in try activities(overlapping: intervals, filter: filter, now: now) {
+            let keys = TimeAccounting.GroupKeys(project: activity.project, client: activity.client,
+                                                category: activity.category, app: activity.appName, source: activity.source)
             for clipped in TimeAccounting.clip(start: activity.start, end: activity.end, to: intervals, now: now) {
-                for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
-                where seconds > 0 {
-                    totals[key, default: [:]][activity.source, default: 0] += seconds
-                }
+                tally.add(clipped, groupBy: groupBy, keys: keys, dates: dates) { Key(key: $0, source: activity.source) }
             }
         }
+        var rows: [String: [String: Double]] = [:]
+        for (key, total) in tally.totals { rows[key.key, default: [:]][key.source] = total.seconds }
         return TimeAccounting.sorted(
-            totals.map { EvidenceRow(key: $0.key, secondsBySource: $0.value) }, groupBy: groupBy,
+            rows.map { EvidenceRow(key: $0.key, secondsBySource: $0.value) }, groupBy: groupBy,
             key: \.key, seconds: { $0.secondsBySource.values.reduce(0, +) })
     }
-
-    /// Evidence over exact instants.
-    public func evidence(
-        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
-        calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [EvidenceRow] {
-        try evidence(in: .instants(range), groupBy: groupBy, filter: filter, calendar: calendar, now: now)
-    }
-}
-
-extension Store {
-    static let noProject = TimeAccounting.noProject
-    static let noClient = TimeAccounting.noClient
-    static let noCategory = TimeAccounting.noCategory
 }

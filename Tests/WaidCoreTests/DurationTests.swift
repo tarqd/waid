@@ -24,7 +24,7 @@ final class DurationTests: XCTestCase {
                                  sample: ActivitySample(appName: "Xcode"))
         let listed = try store.activities(in: day, now: now)
         XCTAssertEqual(listed.map { $0.duration(now: now) }, [0])
-        XCTAssertEqual(try store.evidence(in: day, groupBy: .app, now: now), [])
+        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now), [])
     }
 
     func testRunningSpansCountUpToNow() throws {
@@ -32,10 +32,10 @@ final class DurationTests: XCTestCase {
         let project = try store.ensureProject("Acme / Phase 2")
         try store.startTimer(projectID: project.id, now: t0 + 1800)
 
-        XCTAssertEqual(try store.evidence(in: day, groupBy: .app, now: now).map(\.secondsBySource),
+        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now).map(\.secondsBySource),
                        [[Source.window: 2.0 * 3600]])
-        XCTAssertEqual(try store.summary(in: day, groupBy: .project, now: now).groups.map(\.seconds), [1.5 * 3600])
-        XCTAssertEqual(try store.timesheet(in: day, now: now).map(\.hours), [1.5])
+        XCTAssertEqual(try store.summary(in: .instants(day), groupBy: .project, now: now).groups.map(\.seconds), [1.5 * 3600])
+        XCTAssertEqual(try store.timesheet(in: .instants(day), now: now).map(\.hours), [1.5])
         XCTAssertEqual(try store.budgetStatus(projectIDs: [project.id], now: now).map(\.usedHours), [1.5])
     }
 
@@ -44,8 +44,8 @@ final class DurationTests: XCTestCase {
         try store.createEntry(NewTimeEntry(start: now + 3600, end: now + 2 * 3600, projectID: project.id,
                                            title: "steering meeting", origin: .manual), now: now)
 
-        XCTAssertEqual(try store.summary(in: day, groupBy: .project, now: now).groups.map(\.seconds), [3600])
-        XCTAssertEqual(try store.timesheet(in: day, now: now).map(\.hours), [1])
+        XCTAssertEqual(try store.summary(in: .instants(day), groupBy: .project, now: now).groups.map(\.seconds), [3600])
+        XCTAssertEqual(try store.timesheet(in: .instants(day), now: now).map(\.hours), [1])
         XCTAssertEqual(try store.budgetStatus(projectIDs: [project.id], now: now).map(\.usedHours), [1])
     }
 
@@ -66,8 +66,8 @@ final class DurationTests: XCTestCase {
 
         let budget = try XCTUnwrap(try store.budgetStatus(now: now).first)
         let allTime = DateInterval(start: t0 - 30 * 86400, end: t0 + 30 * 86400)
-        let sheet = try store.timesheet(in: allTime, now: now)
-        let withDrafts = try store.timesheet(in: allTime, includeDrafts: true, now: now)
+        let sheet = try store.timesheet(in: .instants(allTime), now: now)
+        let withDrafts = try store.timesheet(in: .instants(allTime), includeDrafts: true, now: now)
         func total(_ rows: [Store.TimesheetRow], _ value: (Store.TimesheetRow) -> Double) -> Double { rows.reduce(0) { $0 + value($1) } }
 
         XCTAssertEqual(budget.usedHours, (50 + 20 + 45 + 120) / 60.0, accuracy: 1e-9)
@@ -94,13 +94,13 @@ final class DurationTests: XCTestCase {
         let total = 160.0 * 60 + 60
 
         for groupBy in [Store.GroupBy.project, .client, .category, .day] {
-            let summary = try store.summary(in: range, groupBy: groupBy, calendar: utc, now: now)
+            let summary = try store.summary(in: .instants(range), groupBy: groupBy, calendar: utc, now: now)
             XCTAssertEqual(summary.seconds, total, "\(groupBy)")
             XCTAssertEqual(summary.groups.reduce(0) { $0 + $1.seconds }, total, "\(groupBy)")
         }
-        XCTAssertEqual(try store.summary(in: range, groupBy: .day, calendar: utc, now: now).groups.map(\.seconds),
+        XCTAssertEqual(try store.summary(in: .instants(range), groupBy: .day, calendar: utc, now: now).groups.map(\.seconds),
                        [80.0 * 60, 80.0 * 60 + 60])
-        XCTAssertEqual(try store.timesheet(in: range, calendar: utc, now: now).reduce(0) { $0 + $1.hours }, total / 3600,
+        XCTAssertEqual(try store.timesheet(in: .instants(range), calendar: utc, now: now).reduce(0) { $0 + $1.hours }, total / 3600,
                        accuracy: 1e-9)
     }
 }

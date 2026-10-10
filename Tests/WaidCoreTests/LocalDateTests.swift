@@ -37,11 +37,11 @@ final class LocalDateTests: XCTestCase {
         try entry("2026-10-08T12:00:00+09:00", "2026-10-08T15:00:00+09:00", project: acme)
         try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-09T18:00:00-04:00")!)
 
-        let timesheet = try store.timesheet(in: week, calendar: newYorkCalendar, now: now)
+        let timesheet = try store.timesheet(in: .instants(week), calendar: newYorkCalendar, now: now)
         XCTAssertEqual(timesheet.map(\.date), ["2026-10-06", "2026-10-08"])
         XCTAssertEqual(timesheet.map(\.hours), [2, 3])
 
-        let byDay = try store.summary(in: week, groupBy: .day, calendar: newYorkCalendar, now: now).groups
+        let byDay = try store.summary(in: .instants(week), groupBy: .day, calendar: newYorkCalendar, now: now).groups
         XCTAssertEqual(byDay.map(\.key), ["2026-10-06", "2026-10-08"])
         XCTAssertEqual(byDay.map(\.seconds), [2.0 * 3600, 3.0 * 3600])
     }
@@ -60,11 +60,11 @@ final class LocalDateTests: XCTestCase {
                                  sample: ActivitySample(appName: "Mail"), projectID: project.id)
 
         // Tokyo: Fri 22-24 (2 h) + Sat 00-01 (1 h); New York: Fri 12-24 (12 h) + Sat 00-02 (2 h).
-        let evidence = try store.evidence(in: week, groupBy: .day, calendar: utc, now: now)
+        let evidence = try store.evidence(in: .instants(week), groupBy: .day, calendar: utc, now: now)
         XCTAssertEqual(evidence.map(\.key), ["2026-10-09", "2026-10-10"])
         XCTAssertEqual(evidence.map { $0.secondsBySource[Source.window] }, [14.0 * 3600, 3.0 * 3600])
 
-        let unlogged = try store.unloggedTime(in: week, groupBy: .day, calendar: utc, now: now).groups
+        let unlogged = try store.unloggedTime(in: .instants(week), groupBy: .day, calendar: utc, now: now).groups
         XCTAssertEqual(unlogged.map(\.key), ["2026-10-09", "2026-10-10"])
         XCTAssertEqual(unlogged.map(\.seconds), [14.0 * 3600, 3.0 * 3600])
     }
@@ -79,7 +79,7 @@ final class LocalDateTests: XCTestCase {
 
         var tokyoCalendar = Calendar(identifier: .gregorian)
         tokyoCalendar.timeZone = tokyo
-        let timesheet = try store.timesheet(in: week, calendar: tokyoCalendar, now: now)
+        let timesheet = try store.timesheet(in: .instants(week), calendar: tokyoCalendar, now: now)
         XCTAssertEqual(timesheet.map(\.date), ["2026-10-05"], "both in New York, the first recorded zone")
         XCTAssertEqual(timesheet.map(\.hours), [2])
     }
@@ -88,6 +88,6 @@ final class LocalDateTests: XCTestCase {
         let acme = try store.ensureProject("Acme / Phase 2")
         try entry("2026-10-06T08:00:00+09:00", "2026-10-06T09:00:00+09:00", project: acme)
 
-        XCTAssertEqual(try store.timesheet(in: week, calendar: newYorkCalendar, now: now).map(\.date), ["2026-10-05"])
+        XCTAssertEqual(try store.timesheet(in: .instants(week), calendar: newYorkCalendar, now: now).map(\.date), ["2026-10-05"])
     }
 }

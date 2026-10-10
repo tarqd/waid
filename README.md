@@ -49,9 +49,10 @@ Or in any MCP client config:
 
 | Tool | What it does |
 |---|---|
-| `get_status` | Current activity, running timer, minutes unlogged today |
+| `get_status` | Current activity, running timer, Unlogged time today (and how much is billable) |
 | `query_activity` | Observed activities in a range, filterable by project/source/text |
-| `summarize` | `kind=activities` (minutes per source), `entries` (billable + utilization) or `unlogged` (activity no entry covers), by client / project / category / day |
+| `summarize` | Summary: claimed time from time entries, with billable minutes and utilization, by client / project / category / day |
+| `evidence` | Evidence for claiming time, never claimed time: `kind=activities` (observed minutes per source, never summed across sources; also by app / source) or `kind=unlogged` (work a suggestion would offer to claim that no confirmed entry covers, with billable minutes) |
 | `top_uncategorized` | Biggest uncategorized chunks, with example titles, for writing rules |
 | `assign_activity`, `hide_activity` | Pin activities to a project and/or category; hide private ones |
 | `list_clients`, `create_client` | Clients and their domains (acme.com attributes matching URLs) |
@@ -60,7 +61,7 @@ Or in any MCP client config:
 | `create_rule`, `delete_rule` | Retroactive rules setting project and/or category (contains / equals / prefix / regex) |
 | `query_time_entries` | Entries in a range, by project / status / text |
 | `create_time_entry`, `update_time_entry`, `delete_time_entry` | Edit entries; overlaps are rejected |
-| `suggest_time_entries` | Draft entries from categorized activities, with the evidence behind each |
+| `suggest_time_entries` | Draft entries from categorized activities, with the titles and apps that contributed most to each |
 | `confirm_time_entries` | Turn drafts into real entries |
 | `start_timer`, `stop_timer` | Running entries |
 | `budget_status` | Hours used vs budget per engagement |
@@ -70,10 +71,14 @@ Or in any MCP client config:
 
 Entries an agent writes record it as the author (`agent:claude-code`), so you can see and undo them.
 
+Ranges are local dates where you were, per the zone history (weeks start Monday); timestamps with a time of day are exact instants.
+
+**Breaking change:** `summarize` used to default to activity totals and took a `kind`. It now reports time entries only (a Summary); activity totals and Unlogged time moved to the `evidence` tool. Likewise `waid report` now shows the Summary by default, with `--evidence` and `--unlogged` for the others (`--entries` is gone). `suggest_time_entries` returns each draft's top titles and apps as `contributors` (formerly `evidence`), since Evidence now names activity totals.
+
 ## CLI
 
 ```
-waid report [today|yesterday|this_week|last_week|last_7_days|this_month|last_30_days] [--entries|--unlogged] [--by client|project|category|day]
+waid report [today|yesterday|this_week|last_week|last_7_days|this_month|last_30_days] [--evidence|--unlogged] [--by client|project|category|day]
 waid timesheet [RANGE] [--client NAME]      # CSV
 waid budgets
 waid start ["Client / Project" | internal-project] [TITLE] [--category NAME]
