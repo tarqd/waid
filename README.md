@@ -49,7 +49,8 @@ Or in any MCP client config:
 
 | Tool | What it does |
 |---|---|
-| `get_status` | Current activity, running timer, Unlogged time today (and how much is billable) |
+| `get_status` | Current activity, running timer, Unlogged time today (and how much is billable), idle threshold |
+| `set_idle_threshold` | Read or change the idle threshold (seconds, 0 to 86400); changing it re-reads every past day |
 | `query_activity` | Observed activities in a range, filterable by project/source/text |
 | `summarize` | Summary: claimed time from time entries, with billable minutes and utilization, by client / project / category / day |
 | `evidence` | Evidence for claiming time, never claimed time: `kind=activities` (observed minutes per source, never summed across sources; also by app / source) or `kind=unlogged` (work a suggestion would offer to claim that no confirmed entry covers, with billable minutes) |
@@ -84,6 +85,7 @@ waid budgets
 waid start ["Client / Project" | internal-project] [TITLE] [--category NAME]
 waid stop
 waid status
+waid settings idle-threshold [SECONDS]   # print, or set (0 to 86400)
 waid import [--full]
 waid db-path
 ```

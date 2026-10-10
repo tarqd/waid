@@ -28,7 +28,11 @@ let usage = """
                                          "Client / Project" or an internal project name
       waid stop                          Stop the running timer
       waid import [--full]               Import Claude Code sessions now
-      waid status                        Show the current activity and timer
+      waid status                        Show the current activity, timer and idle threshold
+      waid settings idle-threshold [SECONDS]
+                                         Print the idle threshold, or set it (0 to 86400): the longest
+                                         pause in input that still counts as present. Changing it
+                                         re-reads every past day
       waid db-path                       Print the database location
 
     The database lives at $WAID_DB if set.
@@ -254,6 +258,14 @@ case "status":
        case .array(let content)? = value["result"]?["content"],
        let text = content.first?["text"]?.stringValue {
         print(text)
+    }
+
+case "settings":
+    let (store, _) = openStore()
+    do {
+        print(try SettingsCommand.run(args, store: store))
+    } catch {
+        fail("\(error)")
     }
 
 case "db-path":

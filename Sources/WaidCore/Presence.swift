@@ -10,8 +10,25 @@ extension Store {
 
     /// The idle threshold T: the longest gap in input that still counts as
     /// present. Stored in `kv`, 180 s unless set.
-    func idleThreshold() throws -> TimeInterval {
+    public func idleThreshold() throws -> TimeInterval {
         try value(forKey: Self.idleThresholdKey).flatMap(TimeInterval.init) ?? Self.defaultIdleThreshold
+    }
+
+    /// The values the idle threshold may take: none to a full day.
+    public static let idleThresholdLimits: ClosedRange<TimeInterval> = 0...86_400
+
+    /// Sets the idle threshold T. Every past day is re-read through it; no
+    /// observation is rewritten. Throws `StoreError.invalid`, naming the
+    /// limit, for a value outside `idleThresholdLimits`.
+    public func setIdleThreshold(_ seconds: TimeInterval) throws {
+        let limits = Self.idleThresholdLimits
+        guard seconds >= limits.lowerBound else {
+            throw StoreError.invalid("the idle threshold can't be below \(Int(limits.lowerBound)) seconds")
+        }
+        guard seconds <= limits.upperBound else {
+            throw StoreError.invalid("the idle threshold can't be above \(Int(limits.upperBound)) seconds (24 hours)")
+        }
+        try setValue(String(seconds), forKey: Self.idleThresholdKey)
     }
 
     /// The time in `range` you were present and the machine wasn't locked,

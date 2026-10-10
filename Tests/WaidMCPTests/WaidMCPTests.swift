@@ -90,6 +90,38 @@ final class MCPServerTests: XCTestCase {
         _ = try call("evidence", ["kind": "entries"], expectError: true)
     }
 
+    func testStatusShowsTheDefaultIdleThresholdOnANewDatabase() throws {
+        XCTAssertEqual(try call("get_status")["idle_threshold_seconds"], 180)
+    }
+
+    func testSettingTheIdleThresholdReReadsPastEvidence() throws {
+        // Yesterday: 30 minutes of input, 10 reading without input, 20 more of input.
+        let t = TimeRange.parseDate("2026-10-08T13:00:00Z")!
+        let recorder = ActivityRecorder(store: store, interval: 60)
+        for minute in stride(from: 0.0, through: 60, by: 1) {
+            var editor = ActivitySample(appName: "Xcode", title: "main.swift")
+            if minute > 30 && minute < 40 { editor.idleSeconds = (minute - 30) * 60 }
+            try recorder.record(.sample(editor), at: t + minute * 60)
+        }
+        let yesterday: JSONValue = ["start": "2026-10-08T12:00:00Z", "end": "2026-10-08T15:00:00Z", "group_by": "app"]
+        func minutes() throws -> JSONValue? {
+            guard case .array(let rows)? = try call("evidence", yesterday)["groups"] else { return nil }
+            return rows.first?["minutes_by_source"]?["window"]
+        }
+
+        XCTAssertEqual(try minutes(), 50, "the 10-minute pause is longer than the default 3 minutes")
+        XCTAssertEqual(try call("set_idle_threshold", ["seconds": 900])["idle_threshold_seconds"], 900)
+        XCTAssertEqual(try minutes(), 60, "the pause is now bridged, with no observation rewritten")
+        XCTAssertEqual(try call("get_status")["idle_threshold_seconds"], 900)
+    }
+
+    func testAnIdleThresholdOutOfRangeIsRejectedNamingTheLimit() throws {
+        XCTAssertTrue(try call("set_idle_threshold", ["seconds": -1], expectError: true).stringValue?.contains("below 0") == true)
+        XCTAssertTrue(try call("set_idle_threshold", ["seconds": 86_401], expectError: true).stringValue?.contains("86400") == true)
+        XCTAssertTrue(try call("set_idle_threshold", ["seconds": .number(1.5)], expectError: true).stringValue?.contains("integer") == true)
+        XCTAssertEqual(try call("set_idle_threshold")["idle_threshold_seconds"], 180, "unchanged, and readable without seconds")
+    }
+
     func testTopUncategorizedCountsPresentTimeInTheRange() throws {
         let t = TimeRange.parseDate("2026-10-09T13:00:00Z")!
         let terminal = ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh")
