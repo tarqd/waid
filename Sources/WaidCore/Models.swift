@@ -32,8 +32,8 @@ public enum Source {
     public static func agent(_ name: String) -> String { agentPrefix + name }
 }
 
-/// Something the computer observed: a window in front, an agent session.
-/// Activities are evidence; they are categorized but not edited.
+/// A focus observation: a window in front, an agent session. Activities are
+/// evidence; they are categorized but not edited.
 public struct Activity: Codable, Equatable, Sendable {
     public var id: Int64
     public var start: Date
@@ -53,6 +53,11 @@ public struct Activity: Codable, Equatable, Sendable {
     public var meta: String?
     /// Kept out of queries and reports (e.g. private browsing).
     public var hidden: Bool = false
+    /// Still being recorded; `end` is its last heartbeat.
+    public var open: Bool = false
+    /// The IANA zone it happened in, and its local date there ("yyyy-MM-dd").
+    public var zone: String
+    public var localDate: String
 
     /// Filled in by queries: resolved from assignment, rules, or (for the
     /// client) a client's domains.
@@ -164,6 +169,8 @@ public enum EntryOrigin: String, Codable, CaseIterable, Sendable {
     case fromActivities = "from_activities"
     /// Drafted by the suggester.
     case suggested
+    /// Claimed from a stretch when you were away.
+    case away
 }
 
 public enum EntryStatus: String, Codable, CaseIterable, Sendable {
@@ -189,6 +196,11 @@ public struct TimeEntry: Codable, Equatable, Sendable {
     /// "user", or "agent:<client>" for entries written over MCP.
     public var author: String
     public var status: EntryStatus
+    /// The IANA zone it happened in, and its first and last local dates
+    /// there ("yyyy-MM-dd"); `endDate` is nil while running.
+    public var zone: String
+    public var startDate: String
+    public var endDate: String?
 
     /// Filled in by queries.
     public var project: String?

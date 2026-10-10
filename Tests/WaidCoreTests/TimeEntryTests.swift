@@ -45,28 +45,6 @@ final class TimeEntryTests: XCTestCase {
         XCTAssertEqual(try store.stopTimer(now: t0 + 1000)?.id, second.started.id)
         XCTAssertNil(try store.stopTimer(now: t0 + 1100))
     }
-
-    func testMigrationMovesTimersToEntries() throws {
-        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite").path
-        defer { try? FileManager.default.removeItem(atPath: path) }
-        do {
-            let v1 = try Database(path: path)
-            try v1.execute(Store.migrations[0])
-            try v1.execute("PRAGMA user_version = 1")
-            try v1.run("INSERT INTO projects(name, created_ts) VALUES('waid', 0)")
-            try v1.run("INSERT INTO activities(start_ts, end_ts, source, project_id, note) VALUES(?, ?, 'timer', 1, 'blog')", [t0, t0 + 600])
-            try v1.run("INSERT INTO activities(start_ts, end_ts, source, app_name) VALUES(?, ?, 'window', 'Xcode')", [t0, t0 + 600])
-        }
-        let store = try Store(path: path)
-        let range = DateInterval(start: t0, duration: 3600)
-        XCTAssertEqual(try store.activities(in: range).map(\.source), ["window"])
-        let entries = try store.timeEntries(in: range)
-        XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries[0].origin, .timer)
-        XCTAssertEqual(entries[0].project, "waid")
-        XCTAssertEqual(entries[0].notes, "blog")
-        XCTAssertEqual(entries[0].status, .confirmed)
-    }
 }
 
 final class SuggesterTests: XCTestCase {

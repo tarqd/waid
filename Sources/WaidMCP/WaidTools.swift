@@ -677,10 +677,8 @@ public enum WaidTools {
                 let source = Source.agent(agent.lowercased())
                 let externalID = try a.string("external_id") ?? UUID().uuidString
                 let project = try projectArg(a), category = try categoryArg(a)
-                try store.upsertExternal(source: source, externalID: externalID, start: start, end: end,
-                                         title: try a.requiredString("title"), path: try a.string("path"))
-                let row = try store.db.query("SELECT id FROM activities WHERE source = ? AND external_id = ?", [source, externalID])
-                let id = row.first!.int("id")!
+                let id = try store.upsertExternal(source: source, externalID: externalID, start: start, end: end,
+                                                  title: try a.requiredString("title"), path: try a.string("path"))
                 if project != nil || category != nil {
                     try store.assign(activityIDs: [id], projectID: project, categoryID: category)
                 }

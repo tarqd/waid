@@ -28,7 +28,9 @@ final class DurationTests: XCTestCase {
     }
 
     func testRunningSpansCountUpToNow() throws {
-        try store.insertActivity(start: t0, end: nil, source: Source.window, sample: ActivitySample(appName: "Xcode"))
+        // An open observation isn't Running: it counts up to its last heartbeat.
+        let open = try store.insertActivity(start: t0, end: nil, source: Source.window, sample: ActivitySample(appName: "Xcode"))
+        try store.setEnd(activityID: open, end: now)
         let project = try store.ensureProject("Acme / Phase 2")
         try store.startTimer(projectID: project.id, now: t0 + 1800)
 

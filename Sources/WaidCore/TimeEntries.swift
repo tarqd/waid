@@ -89,14 +89,17 @@ extension Store {
     func insertEntry(_ new: NewTimeEntry, now: Date) throws -> TimeEntry {
         try validate(start: new.start, end: new.end, excluding: nil, now: now)
         let billable = try new.billable ?? catalog().defaultBillable(projectID: new.projectID, categoryID: new.categoryID)
+        // The process zone for now; the fallback chain of ADR-0002 comes later.
+        let zone = TimeZone.current
+        let dates = Self.localDates(start: new.start, end: new.end, in: zone)
         try db.run(
             """
-            INSERT INTO time_entries(start_ts, end_ts, project_id, category_id, title, notes, tags, billable, origin,
-                                     author, status, created_ts, updated_ts)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO time_entries(start_ts, end_ts, zone, start_date, end_date, project_id, category_id, title, notes,
+                                     tags, billable, origin, author, status, created_ts, updated_ts)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [new.start, new.end, new.projectID, new.categoryID, new.title, new.notes, Self.encodeTags(new.tags),
-             billable, new.origin.rawValue, new.author, new.status.rawValue, now, now])
+            [new.start, new.end, zone.identifier, dates.start, dates.end, new.projectID, new.categoryID, new.title,
+             new.notes, Self.encodeTags(new.tags), billable, new.origin.rawValue, new.author, new.status.rawValue, now, now])
         return try requireTimeEntry(id: db.lastInsertRowID)
     }
 
@@ -117,14 +120,15 @@ extension Store {
             if let billable = changes.billable { entry.billable = billable }
             if let status = changes.status { entry.status = status }
             try validate(start: entry.start, end: entry.end, excluding: id, now: now)
+            let dates = Self.localDates(start: entry.start, end: entry.end, in: Self.zone(entry))
             try db.run(
                 """
-                UPDATE time_entries SET start_ts = ?, end_ts = ?, project_id = ?, category_id = ?, title = ?, notes = ?,
-                    tags = ?, billable = ?, status = ?, updated_ts = ?
+                UPDATE time_entries SET start_ts = ?, end_ts = ?, start_date = ?, end_date = ?, project_id = ?,
+                    category_id = ?, title = ?, notes = ?, tags = ?, billable = ?, status = ?, updated_ts = ?
                 WHERE id = ?
                 """,
-                [entry.start, entry.end, entry.projectID, entry.categoryID, entry.title, entry.notes,
-                 Self.encodeTags(entry.tags), entry.billable, entry.status.rawValue, now, id])
+                [entry.start, entry.end, dates.start, dates.end, entry.projectID, entry.categoryID, entry.title,
+                 entry.notes, Self.encodeTags(entry.tags), entry.billable, entry.status.rawValue, now, id])
             return try requireTimeEntry(id: id)
         }
     }
@@ -154,9 +158,7 @@ extension Store {
         try db.transaction {
             var stopped: TimeEntry?
             if let running = try runningEntry() {
-                try db.run("UPDATE time_entries SET end_ts = ?, updated_ts = ? WHERE id = ?",
-                           [max(now, running.start), now, running.id])
-                stopped = try requireTimeEntry(id: running.id)
+                stopped = try stop(running, now: now)
             }
             var new = NewTimeEntry(start: now, end: nil, projectID: projectID, categoryID: categoryID, title: title,
                                    origin: .timer)
@@ -171,10 +173,32 @@ extension Store {
     public func stopTimer(now: Date = Date()) throws -> TimeEntry? {
         try db.transaction {
             guard let running = try runningEntry() else { return nil }
-            try db.run("UPDATE time_entries SET end_ts = ?, updated_ts = ? WHERE id = ?",
-                       [max(now, running.start), now, running.id])
-            return try requireTimeEntry(id: running.id)
+            return try stop(running, now: now)
         }
+    }
+
+    /// Ends a running entry at `now`, or at its start if that is later.
+    private func stop(_ running: TimeEntry, now: Date) throws -> TimeEntry {
+        let end = max(now, running.start)
+        let endDate = Self.localDates(start: running.start, end: end, in: Self.zone(running)).end
+        try db.run("UPDATE time_entries SET end_ts = ?, end_date = ?, updated_ts = ? WHERE id = ?",
+                   [end, endDate, now, running.id])
+        return try requireTimeEntry(id: running.id)
+    }
+
+    private static func zone(_ entry: TimeEntry) -> TimeZone {
+        TimeZone(identifier: entry.zone) ?? .current
+    }
+
+    /// The local dates of a span's first and last instants in `zone`. A span
+    /// ending exactly at a local midnight has no time on the date that starts
+    /// there, so its last date is the one before. No end, no last date.
+    static func localDates(start: Date, end: Date?, in zone: TimeZone) -> (start: String, end: String?) {
+        let first = LocalDate(start, in: zone)
+        guard let end else { return (first.description, nil) }
+        var last = LocalDate(end, in: zone)
+        if end > start && last.start(in: zone) == end { last = last.adding(days: -1) }
+        return (first.description, max(first, last).description)
     }
 
     /// Entries may not overlap; a running entry counts as ending now.
@@ -217,7 +241,8 @@ extension Store {
             tags: decodeList(row.string("tags")), billable: row.int("billable") == 1,
             origin: EntryOrigin(rawValue: row.string("origin") ?? "") ?? .manual,
             author: row.string("author") ?? "user",
-            status: EntryStatus(rawValue: row.string("status") ?? "") ?? .confirmed)
+            status: EntryStatus(rawValue: row.string("status") ?? "") ?? .confirmed,
+            zone: row.string("zone")!, startDate: row.string("start_date")!, endDate: row.string("end_date"))
         catalog.resolve(&entry)
         return entry
     }

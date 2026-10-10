@@ -18,85 +18,24 @@ public enum StoreError: Error, CustomStringConvertible, Equatable {
 public final class Store {
     public let db: Database
 
-    static let migrations: [String] = [
-        """
-        CREATE TABLE projects(
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            color TEXT,
-            archived INTEGER NOT NULL DEFAULT 0,
-            created_ts REAL NOT NULL
-        );
-        CREATE TABLE activities(
-            id INTEGER PRIMARY KEY,
-            start_ts REAL NOT NULL,
-            end_ts REAL,
-            source TEXT NOT NULL,
-            bundle_id TEXT,
-            app_name TEXT,
-            title TEXT,
-            url TEXT,
-            path TEXT,
-            external_id TEXT,
-            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
-            note TEXT,
-            meta TEXT
-        );
-        CREATE INDEX activities_start ON activities(start_ts);
-        CREATE UNIQUE INDEX activities_external ON activities(source, external_id)
-            WHERE external_id IS NOT NULL;
-        CREATE TABLE rules(
-            id INTEGER PRIMARY KEY,
-            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            field TEXT NOT NULL,
-            op TEXT NOT NULL,
-            pattern TEXT NOT NULL,
-            priority INTEGER NOT NULL DEFAULT 0,
-            created_ts REAL NOT NULL
-        );
-        CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        """,
-        // Split claimed time (time entries) from observed time (activities).
-        """
-        ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id) ON DELETE SET NULL;
-        ALTER TABLE activities ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
-        CREATE TABLE time_entries(
-            id INTEGER PRIMARY KEY,
-            start_ts REAL NOT NULL,
-            end_ts REAL,
-            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
-            title TEXT,
-            notes TEXT,
-            tags TEXT NOT NULL DEFAULT '[]',
-            billable INTEGER NOT NULL DEFAULT 0,
-            origin TEXT NOT NULL,
-            author TEXT NOT NULL DEFAULT 'user',
-            status TEXT NOT NULL DEFAULT 'confirmed',
-            created_ts REAL NOT NULL,
-            updated_ts REAL NOT NULL
-        );
-        CREATE INDEX time_entries_start ON time_entries(start_ts);
-        INSERT INTO time_entries(start_ts, end_ts, project_id, notes, origin, created_ts, updated_ts)
-            SELECT start_ts, end_ts, project_id, note, source, start_ts, COALESCE(end_ts, start_ts)
-            FROM activities WHERE source IN ('timer', 'manual');
-        DELETE FROM activities WHERE source IN ('timer', 'manual');
-        """,
-        // Professional-services model: clients, projects that are either
-        // client engagements or internal, and categories (kind of work) as a
-        // second, independent dimension. Parents of the old project tree
-        // become clients.
-        """
+    /// The schema version a database created by `schema` carries. Earlier
+    /// versions came from the migration history before observations, which
+    /// waid never shipped and does not migrate.
+    static let schemaVersion = 5
+
+    /// The whole schema, created at once in a new database. Every table is
+    /// STRICT (SQLite 3.37+), and observations enforce their own rules.
+    static let schema = """
         CREATE TABLE clients(
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE COLLATE NOCASE,
             domains TEXT NOT NULL DEFAULT '[]',
             archived INTEGER NOT NULL DEFAULT 0,
             created_ts REAL NOT NULL
-        );
-        INSERT INTO clients(name, created_ts)
-            SELECT p.name, p.created_ts FROM projects p
-            WHERE EXISTS (SELECT 1 FROM projects c WHERE c.parent_id = p.id);
-        CREATE TABLE projects_new(
+        ) STRICT;
+
+        -- A project with a client is an engagement; one without is internal.
+        CREATE TABLE projects(
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
@@ -107,17 +46,10 @@ public final class Store {
             ends_on TEXT,
             color TEXT,
             created_ts REAL NOT NULL
-        );
-        INSERT INTO projects_new(id, name, client_id, status, billable, color, created_ts)
-            SELECT p.id, p.name,
-                (SELECT c.id FROM clients c JOIN projects parent ON parent.name = c.name WHERE parent.id = p.parent_id),
-                CASE WHEN p.archived THEN 'closed' ELSE 'active' END,
-                p.parent_id IS NOT NULL, p.color, p.created_ts
-            FROM projects p;
-        DROP TABLE projects;
-        ALTER TABLE projects_new RENAME TO projects;
+        ) STRICT;
         CREATE UNIQUE INDEX projects_client_name ON projects(COALESCE(client_id, 0), name COLLATE NOCASE);
 
+        -- The kind of work, independent of what it's for.
         CREATE TABLE categories(
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -125,13 +57,11 @@ public final class Store {
             color TEXT,
             archived INTEGER NOT NULL DEFAULT 0,
             created_ts REAL NOT NULL
-        );
+        ) STRICT;
         INSERT INTO categories(name, billable, created_ts) VALUES
             ('Presales', 0, 0), ('Implementation', 1, 0), ('Meetings', 1, 0), ('Admin', 0, 0);
-        ALTER TABLE activities ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;
-        ALTER TABLE time_entries ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;
 
-        CREATE TABLE rules_new(
+        CREATE TABLE rules(
             id INTEGER PRIMARY KEY,
             project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
             category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
@@ -141,22 +71,101 @@ public final class Store {
             priority INTEGER NOT NULL DEFAULT 0,
             created_ts REAL NOT NULL,
             CHECK (project_id IS NOT NULL OR category_id IS NOT NULL)
-        );
-        INSERT INTO rules_new(id, project_id, field, op, pattern, priority, created_ts)
-            SELECT id, project_id, field, op, pattern, priority, created_ts FROM rules;
-        DROP TABLE rules;
-        ALTER TABLE rules_new RENAME TO rules;
-        """,
-        // Zone history (ADR-0001): which time zone you were in, and from when.
-        """
+        ) STRICT;
+
+        -- Observations (GLOSSARY.md): stretches of the focus, active and
+        -- locked streams, each with the zone it happened in and its local
+        -- date (ADR-0002). end_ts is never NULL: an open observation's end
+        -- is its last heartbeat.
+        CREATE TABLE observations(
+            id INTEGER PRIMARY KEY,
+            stream TEXT NOT NULL CHECK (stream IN ('focus', 'active', 'locked')),
+            source TEXT NOT NULL,
+            start_ts REAL NOT NULL,
+            end_ts REAL NOT NULL,
+            open INTEGER NOT NULL DEFAULT 0 CHECK (open IN (0, 1)),
+            zone TEXT NOT NULL,
+            local_date TEXT NOT NULL,
+            bundle_id TEXT,
+            app_name TEXT,
+            title TEXT,
+            url TEXT,
+            path TEXT,
+            external_id TEXT,
+            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+            category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+            hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+            note TEXT,
+            meta TEXT,
+            CHECK (end_ts >= start_ts),
+            -- What was in front, and an importer's id, only describe focus.
+            CHECK (stream = 'focus' OR (bundle_id IS NULL AND app_name IS NULL AND title IS NULL
+                                        AND url IS NULL AND path IS NULL AND external_id IS NULL))
+        ) STRICT;
+        CREATE INDEX observations_stream_start ON observations(stream, start_ts);
+        CREATE INDEX observations_local_date ON observations(local_date);
+        CREATE UNIQUE INDEX observations_external ON observations(source, external_id)
+            WHERE external_id IS NOT NULL;
+
+        -- No two observations of one stream and source overlap. Imported
+        -- agent segments may overlap each other: sessions run in parallel.
+        CREATE TRIGGER observations_no_overlap_insert BEFORE INSERT ON observations
+        WHEN EXISTS (
+            SELECT 1 FROM observations o
+            WHERE o.stream = NEW.stream AND o.source = NEW.source
+              AND o.start_ts < NEW.end_ts AND NEW.start_ts < o.end_ts
+              AND (o.external_id IS NULL OR NEW.external_id IS NULL))
+        BEGIN
+            SELECT RAISE(ABORT, 'observation overlaps another in the same stream and source');
+        END;
+        CREATE TRIGGER observations_no_overlap_update
+        BEFORE UPDATE OF stream, source, start_ts, end_ts, external_id ON observations
+        WHEN EXISTS (
+            SELECT 1 FROM observations o
+            WHERE o.id != NEW.id AND o.stream = NEW.stream AND o.source = NEW.source
+              AND o.start_ts < NEW.end_ts AND NEW.start_ts < o.end_ts
+              AND (o.external_id IS NULL OR NEW.external_id IS NULL))
+        BEGIN
+            SELECT RAISE(ABORT, 'observation overlaps another in the same stream and source');
+        END;
+
+        -- Claimed time. zone is where it happened; start_date and end_date
+        -- are its local dates there, end_date NULL while running.
+        CREATE TABLE time_entries(
+            id INTEGER PRIMARY KEY,
+            start_ts REAL NOT NULL,
+            end_ts REAL,
+            zone TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT,
+            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+            category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+            title TEXT,
+            notes TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            billable INTEGER NOT NULL DEFAULT 0,
+            origin TEXT NOT NULL CHECK (origin IN ('timer', 'manual', 'from_activities', 'suggested', 'away')),
+            author TEXT NOT NULL DEFAULT 'user',
+            status TEXT NOT NULL DEFAULT 'confirmed',
+            created_ts REAL NOT NULL,
+            updated_ts REAL NOT NULL,
+            CHECK ((end_ts IS NULL) = (end_date IS NULL))
+        ) STRICT;
+        CREATE INDEX time_entries_start ON time_entries(start_ts);
+
+        -- Zone history (ADR-0001), superseded by ADR-0002; still read for
+        -- range selection until stored local dates replace it.
         CREATE TABLE zone_history(
             id INTEGER PRIMARY KEY,
             zone TEXT NOT NULL,
             effective_ts REAL NOT NULL
-        );
+        ) STRICT;
         CREATE INDEX zone_history_effective ON zone_history(effective_ts);
-        """,
-    ]
+
+        -- Bookkeeping and settings.
+        CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+        INSERT INTO kv(key, value) VALUES('idle_threshold_seconds', '180');
+        """
 
     public init(path: String) throws {
         db = try Database(path: path)
@@ -181,19 +190,14 @@ public final class Store {
 
     private func migrate() throws {
         let version = Int(try db.query("PRAGMA user_version").first?.int("user_version") ?? 0)
-        guard version < Self.migrations.count else { return }
-        // Table rebuilds need foreign keys off (they can't be toggled inside a
-        // transaction); integrity is checked before committing instead.
-        try db.execute("PRAGMA foreign_keys=OFF")
-        defer { try? db.execute("PRAGMA foreign_keys=ON") }
+        if version == Self.schemaVersion { return }
+        guard version == 0 else {
+            throw StoreError.invalid(
+                "the database has schema version \(version), from before observations, and can't be migrated; move it aside to start fresh")
+        }
         try db.transaction {
-            for (index, sql) in Self.migrations.enumerated() where index >= version {
-                try db.execute(sql)
-            }
-            if let violation = try db.query("PRAGMA foreign_key_check").first {
-                throw StoreError.invalid("migration broke a foreign key: \(violation.columns)")
-            }
-            try db.execute("PRAGMA user_version = \(Self.migrations.count)")
+            try db.execute(Self.schema)
+            try db.execute("PRAGMA user_version = \(Self.schemaVersion)")
         }
     }
 
@@ -211,40 +215,62 @@ public final class Store {
 
     // MARK: Activities
 
+    /// Inserts a focus observation stamped with `zone` and the local date of
+    /// its start there. With no `end` it is open, its end the heartbeat at
+    /// `start`, until `close(activityID:end:)`; with an `end` it is closed.
     @discardableResult
     public func insertActivity(
         start: Date, end: Date?, source: String, sample: ActivitySample = ActivitySample(),
-        projectID: Int64? = nil, note: String? = nil
+        projectID: Int64? = nil, note: String? = nil, zone: TimeZone = .current
     ) throws -> Int64 {
         try db.run(
             """
-            INSERT INTO activities(start_ts, end_ts, source, bundle_id, app_name, title, url, path, project_id, note)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO observations(stream, source, start_ts, end_ts, open, zone, local_date,
+                                     bundle_id, app_name, title, url, path, project_id, note)
+            VALUES('focus', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [start, end, source, sample.bundleID, sample.appName, sample.title, sample.url, sample.path, projectID, note])
+            [source, start, end ?? start, end == nil, zone.identifier, LocalDate(start, in: zone).description,
+             sample.bundleID, sample.appName, sample.title, sample.url, sample.path, projectID, note])
         return db.lastInsertRowID
     }
 
+    /// Moves an open observation's heartbeat. A closed one can't be changed.
     public func setEnd(activityID: Int64, end: Date) throws {
-        try db.run("UPDATE activities SET end_ts = ? WHERE id = ?", [end, activityID])
+        try db.run("UPDATE observations SET end_ts = ? WHERE id = ?", [end, activityID])
     }
 
-    /// Inserts or refreshes a span keyed by `(source, externalID)`. Used by
-    /// importers so re-running them is idempotent. A project assigned by the
-    /// user is never overwritten.
+    /// Closes an open observation at `end`; after this its time is fixed.
+    public func close(activityID: Int64, end: Date) throws {
+        try db.run("UPDATE observations SET end_ts = ?, open = 0 WHERE id = ? AND open = 1", [end, activityID])
+    }
+
+    /// Closes every observation still open at its last heartbeat, as after a
+    /// restart. Returns how many were closed.
+    @discardableResult
+    public func closeOpenObservations() throws -> Int {
+        try db.run("UPDATE observations SET open = 0 WHERE open = 1")
+    }
+
+    /// Inserts or refreshes a focus observation keyed by `(source,
+    /// externalID)` and returns its id. Used by importers so re-running them
+    /// is idempotent. A project assigned by the user is never overwritten.
+    @discardableResult
     public func upsertExternal(
         source: String, externalID: String, start: Date, end: Date,
-        title: String?, path: String?, meta: String? = nil
-    ) throws {
-        try db.run(
+        title: String?, path: String?, meta: String? = nil, zone: TimeZone = .current
+    ) throws -> Int64 {
+        let row = try db.query(
             """
-            INSERT INTO activities(start_ts, end_ts, source, external_id, title, path, meta)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO observations(stream, source, start_ts, end_ts, zone, local_date, external_id, title, path, meta)
+            VALUES('focus', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, external_id) WHERE external_id IS NOT NULL DO UPDATE SET
                 start_ts = excluded.start_ts, end_ts = excluded.end_ts,
+                zone = excluded.zone, local_date = excluded.local_date,
                 title = excluded.title, path = excluded.path, meta = excluded.meta
+            RETURNING id
             """,
-            [start, end, source, externalID, title, path, meta])
+            [source, start, end, zone.identifier, LocalDate(start, in: zone).description, externalID, title, path, meta])
+        return row[0].int("id")!
     }
 
     /// Explicitly assigns spans to a project and/or category, overriding
@@ -256,10 +282,10 @@ public final class Store {
             try activityIDs.reduce(0) { total, id in
                 var changed = 0
                 if let projectID {
-                    changed = try db.run("UPDATE activities SET project_id = ? WHERE id = ?", [projectID, id])
+                    changed = try db.run("UPDATE observations SET project_id = ? WHERE id = ?", [projectID, id])
                 }
                 if let categoryID {
-                    changed = try db.run("UPDATE activities SET category_id = ? WHERE id = ?", [categoryID, id])
+                    changed = try db.run("UPDATE observations SET category_id = ? WHERE id = ?", [categoryID, id])
                 }
                 return total + changed
             }
@@ -267,7 +293,7 @@ public final class Store {
     }
 
     public func activity(id: Int64) throws -> Activity? {
-        try db.query("SELECT * FROM activities WHERE id = ?", [id]).first.map(Self.activity)
+        try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).first.map(Self.activity)
     }
 
     /// Hides spans from queries and reports, or unhides them. Returns rows changed.
@@ -275,14 +301,14 @@ public final class Store {
     public func setHidden(activityIDs: [Int64], hidden: Bool) throws -> Int {
         try db.transaction {
             try activityIDs.reduce(0) { total, id in
-                total + (try db.run("UPDATE activities SET hidden = ? WHERE id = ?", [hidden, id]))
+                total + (try db.run("UPDATE observations SET hidden = ? WHERE id = ?", [hidden, id]))
             }
         }
     }
 
     public func latestActivity(source: String) throws -> Activity? {
         try db.query(
-            "SELECT * FROM activities WHERE source = ? ORDER BY start_ts DESC LIMIT 1", [source]
+            "SELECT * FROM observations WHERE stream = 'focus' AND source = ? ORDER BY start_ts DESC LIMIT 1", [source]
         ).first.map(Self.activity)
     }
 
@@ -301,8 +327,8 @@ public final class Store {
 
     /// Spans overlapping `range`, with project, category and client resolved.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter(), now: Date = Date()) throws -> [Activity] {
-        var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, MAX(?, start_ts)) > ?"
-        var params: [SQLBindable] = [range.end, now, range.start]
+        var sql = "SELECT * FROM observations WHERE stream = 'focus' AND start_ts < ? AND end_ts > ?"
+        var params: [SQLBindable] = [range.end, range.start]
         if !filter.includeHidden { sql += " AND hidden = 0" }
         if let sources = filter.sources, !sources.isEmpty {
             sql += " AND source IN (" + sources.map { _ in "?" }.joined(separator: ",") + ")"
@@ -356,7 +382,9 @@ public final class Store {
             source: row.string("source")!, bundleID: row.string("bundle_id"), appName: row.string("app_name"),
             title: row.string("title"), url: row.string("url"), path: row.string("path"),
             externalID: row.string("external_id"), assignedProjectID: row.int("project_id"),
-            assignedCategoryID: row.int("category_id"), note: row.string("note"), meta: row.string("meta"), hidden: row.int("hidden") == 1)
+            assignedCategoryID: row.int("category_id"), note: row.string("note"), meta: row.string("meta"),
+            hidden: row.int("hidden") == 1, open: row.int("open") == 1, zone: row.string("zone")!,
+            localDate: row.string("local_date")!)
     }
 
     // MARK: Evidence

@@ -2,9 +2,9 @@ import Foundation
 
 /// Turns a stream of point-in-time samples into contiguous spans.
 ///
-/// Consecutive samples with the same app/title/url/path extend the current
-/// span. A change, a gap longer than `maxGap` (sleep, daemon restart), or the
-/// user going idle closes it.
+/// Consecutive samples with the same app/title/url/path extend the open focus
+/// observation. A change, a gap longer than `maxGap` (sleep, daemon restart),
+/// or the user going idle closes it.
 public final class ActivityRecorder {
     private struct Key: Equatable {
         var bundleID, appName, title, url, path: String?
@@ -17,6 +17,7 @@ public final class ActivityRecorder {
     public let maxGap: TimeInterval
     public let idleThreshold: TimeInterval
     private var current: (id: Int64, key: Key, start: Date, end: Date)?
+    private var started = false
 
     public init(store: Store, maxGap: TimeInterval = 30, idleThreshold: TimeInterval = 180) {
         self.store = store
@@ -24,17 +25,24 @@ public final class ActivityRecorder {
         self.idleThreshold = idleThreshold
     }
 
-    /// Records one sample. Pass nil when nothing should be tracked (screen
-    /// locked, system going to sleep).
-    public func record(_ sample: ActivitySample?, at now: Date) throws {
+    /// Records one sample, stamping new observations with `zone`. Pass nil
+    /// when nothing should be tracked (screen locked, system going to sleep).
+    public func record(_ sample: ActivitySample?, at now: Date, zone: TimeZone = .current) throws {
+        if !started {
+            // Whatever a previous run left open ended at its last heartbeat.
+            try store.closeOpenObservations()
+            started = true
+        }
         guard let sample, sample.idleSeconds < idleThreshold else {
-            // Trim the idle tail: input stopped `idleSeconds` ago, but we kept
-            // extending the span until the threshold tripped.
-            if let current, let sample {
-                let lastInput = now.addingTimeInterval(-sample.idleSeconds)
-                if lastInput < current.end {
-                    try store.setEnd(activityID: current.id, end: max(current.start, lastInput))
+            if let current {
+                // Trim the idle tail: input stopped `idleSeconds` ago, but we
+                // kept extending the span until the threshold tripped.
+                var end = current.end
+                if let sample {
+                    let lastInput = now.addingTimeInterval(-sample.idleSeconds)
+                    if lastInput < end { end = max(current.start, lastInput) }
                 }
+                try store.close(activityID: current.id, end: end)
             }
             current = nil
             return
@@ -46,11 +54,13 @@ public final class ActivityRecorder {
             try store.setEnd(activityID: current.id, end: now)
             self.current = current
         } else {
-            // A switch within the gap means the previous span lasted until now.
-            if let current, now.timeIntervalSince(current.end) <= maxGap {
-                try store.setEnd(activityID: current.id, end: now)
+            if let current {
+                // A switch within the gap means the previous span lasted
+                // until now; after a longer gap it ended at its last sample.
+                let end = now.timeIntervalSince(current.end) <= maxGap ? now : current.end
+                try store.close(activityID: current.id, end: end)
             }
-            let id = try store.insertActivity(start: now, end: now, source: Source.window, sample: sample)
+            let id = try store.insertActivity(start: now, end: nil, source: Source.window, sample: sample, zone: zone)
             current = (id, key, now, now)
         }
     }

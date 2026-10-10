@@ -191,30 +191,4 @@ final class ProfessionalServicesTests: XCTestCase {
         onlyBeta.clientID = try store.client(named: "Beta")?.id
         XCTAssertEqual(try store.timesheet(in: .instants(day), filter: onlyBeta, now: now).map(\.project), ["Beta / Opportunity"])
     }
-
-    func testMigrationTurnsProjectTreeIntoClients() throws {
-        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite").path
-        defer { try? FileManager.default.removeItem(atPath: path) }
-        do {
-            let v2 = try Database(path: path)
-            try v2.execute(Store.migrations[0])
-            try v2.execute(Store.migrations[1])
-            try v2.execute("PRAGMA user_version = 2")
-            try v2.run("INSERT INTO projects(id, name, created_ts) VALUES(1, 'Acme', 0)")
-            try v2.run("INSERT INTO projects(id, name, parent_id, created_ts) VALUES(2, 'Phase 2', 1, 0)")
-            try v2.run("INSERT INTO projects(id, name, created_ts) VALUES(3, 'waid', 0)")
-            try v2.run("INSERT INTO rules(project_id, field, op, pattern, created_ts) VALUES(2, 'title', 'contains', 'acme', 0)")
-            try v2.run("INSERT INTO time_entries(start_ts, end_ts, project_id, origin, created_ts, updated_ts) VALUES(?, ?, 2, 'manual', 0, 0)",
-                       [t0, t0 + 600])
-        }
-        let store = try Store(path: path)
-        XCTAssertEqual(try store.clients().map(\.name), ["Acme"])
-        let phase2 = try store.requireProject("Acme / Phase 2")
-        XCTAssertEqual(phase2.id, 2)
-        XCTAssertTrue(phase2.billable)
-        XCTAssertNil(try store.requireProject("waid").client)
-        XCTAssertEqual(try store.rules().map(\.projectID), [2])
-        XCTAssertEqual(try store.timeEntries(in: day).first?.project, "Acme / Phase 2")
-        XCTAssertEqual(try store.categories().count, 4)
-    }
 }
