@@ -19,14 +19,24 @@ public enum WaidTools {
         Two kinds of data:
         - Activities: what the computer observed. Frontmost app/window/URL (source "window") and \
         coding-agent sessions ("agent:<name>"). Attributed by rules evaluated at query time (a new rule \
-        recategorizes history), never edited. Sources overlap, so activity summaries report minutes per source.
+        recategorizes history), never edited.
         - Time entries: what the user claims; the numbers for timesheets, budgets and billing. Never \
         overlap. Drafts don't count until confirmed. Billable is derived from project and category unless set.
 
-        Typical flows: "where did my time go" -> summarize kind=activities. "Log my week" -> \
-        suggest_time_entries, improve titles/notes with update_time_entry (notes become the billing \
-        narrative), then confirm_time_entries once the user agrees. "What haven't I logged" -> \
-        summarize kind=unlogged. "Timesheet for Acme" -> timesheet. "How's the budget" -> budget_status.
+        Claimed time vs evidence:
+        - A Summary (summarize) is always about time entries: claimed time, with billable minutes and \
+        utilization. Reports (timesheet, budget_status) are built from Summaries. Quote these when asked \
+        how much time went to a client or project.
+        - Evidence (evidence tool) is for claiming time, never presented as claimed time. kind=activities \
+        totals observed activity per source; sources overlap, so they are never summed. kind=unlogged is \
+        Unlogged time: work a suggestion would offer to claim, minus confirmed entries.
+        Breaking change: summarize used to default to activities and took a kind; it now reports time \
+        entries only. Use the evidence tool for activities and unlogged time.
+
+        Typical flows: "how much did I do for Acme" -> summarize. "Where did my time go" -> evidence. \
+        "Log my week" -> suggest_time_entries, improve titles/notes with update_time_entry (notes become \
+        the billing narrative), then confirm_time_entries once the user agrees. "What haven't I logged" -> \
+        evidence kind=unlogged. "Timesheet for Acme" -> timesheet. "How's the budget" -> budget_status.
         To categorize, prefer top_uncategorized -> create_rule over assigning activities one by one. \
         Entries you create are attributed to you as the author.
         Times are ISO 8601; bare dates and datetimes without an offset are the user's local time.
@@ -84,6 +94,11 @@ public enum WaidTools {
             do {
                 return try TimeRange.resolve(range: a.string("range"), start: a.string("start"), end: a.string("end"), now: now())
             } catch let e as TimeRange.ParseError { throw ToolError(e.description) }
+        }
+        func groupBy(_ a: Arguments) throws -> Store.GroupBy {
+            let name = try a.string("group_by") ?? "project"
+            guard let groupBy = Store.GroupBy(rawValue: name) else { throw ToolError("unknown group_by \"\(name)\"") }
+            return groupBy
         }
         func date(_ a: Arguments, _ key: String) throws -> Date? {
             guard let s = try a.string(key) else { return nil }
@@ -168,12 +183,12 @@ public enum WaidTools {
                     try store.activities(in: DateInterval(start: a.start, end: max(a.end ?? now(), a.start + 1)), now: now())
                         .first { $0.id == a.id }
                 }
-                let unlogged = try store.unloggedSummary(in: TimeRange.named("today", now: now())!, groupBy: .project, now: now())
+                let unlogged = try store.unloggedTime(in: TimeRange.named("today", now: now())!, groupBy: .project, now: now())
                 return Status(
                     now: now(),
                     current: current.map { ActivityView($0, now: now()) },
                     runningTimer: try store.runningEntry().map { EntryView($0, now: now()) },
-                    unloggedTodayMinutes: minutes(unlogged.reduce(0) { $0 + $1.seconds }),
+                    unloggedTodayMinutes: minutes(unlogged.seconds),
                     lastAgentImport: try store.value(forKey: "ingest.claude-code.last_run")
                         .flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
             },
@@ -197,46 +212,59 @@ public enum WaidTools {
             Tool(
                 name: "summarize",
                 description: """
-                    Total time in a range. kind=activities (default): observed time, in minutes per source. \
-                    kind=entries: confirmed time entries, with billable minutes and utilization (billable / total). \
-                    kind=unlogged: attributed activity time not covered by any confirmed entry. \
-                    group_by project, client, category or day (activities also support app and source).
+                    Summary: claimed time from time entries in a range, with billable minutes and utilization \
+                    (billable / total). Confirmed entries only unless include_drafts. group_by project, client, \
+                    category or day. Observed activity is not here: use the evidence tool for that.
                     """,
-                inputSchema: schema(rangeProps.merging(activityFilterProps) { $1 }.merging([
-                    "kind": ["type": "string", "enum": ["activities", "entries", "unlogged"]],
-                    "group_by": ["type": "string", "enum": .array(Store.GroupBy.allCases.map { .string($0.rawValue) }),
+                inputSchema: schema(rangeProps.merging(attributionFilterProps) { $1 }.merging([
+                    "text": ["type": "string", "description": "Substring match on entry title or notes."],
+                    "group_by": ["type": "string", "enum": ["project", "client", "category", "day"],
                                  "description": "Default: project."],
-                    "include_drafts": ["type": "boolean", "description": "kind=entries: count drafts too (default false)."],
+                    "include_drafts": ["type": "boolean", "description": "Count draft entries too (default false)."],
                 ]) { $1 }),
                 readOnly: true
             ) { a, _ in
-                let groupName = try a.string("group_by") ?? "project"
-                guard let groupBy = Store.GroupBy(rawValue: groupName) else { throw ToolError("unknown group_by \"\(groupName)\"") }
-                let interval = try range(a)
-                let kind = try a.string("kind") ?? "activities"
-                var summary = Summary(start: interval.start, end: interval.end, kind: kind, groupBy: groupBy.rawValue, groups: [])
-                switch kind {
-                case "activities":
-                    summary.groups = try store.summary(in: interval, groupBy: groupBy, filter: try activityFilter(a), now: now())
-                        .map { SummaryGroup(key: $0.key, minutesBySource: $0.secondsBySource.mapValues(minutes)) }
-                case "entries":
-                    var f = try entryFilter(a)
-                    f.status = nil
-                    let rows = try store.entrySummary(in: interval, groupBy: groupBy, filter: f,
-                                                      includeDrafts: try a.bool("include_drafts") ?? false, now: now())
-                    summary.groups = rows.map { SummaryGroup(key: $0.key, minutes: minutes($0.seconds), billableMinutes: minutes($0.billableSeconds)) }
-                    let total = rows.reduce(0) { $0 + $1.seconds }, billable = rows.reduce(0) { $0 + $1.billableSeconds }
-                    summary.totalMinutes = minutes(total)
-                    summary.billableMinutes = minutes(billable)
-                    summary.utilization = total > 0 ? (billable / total * 1000).rounded() / 1000 : nil
-                case "unlogged":
-                    let rows = try store.unloggedSummary(in: interval, groupBy: groupBy, now: now())
-                    summary.groups = rows.map { SummaryGroup(key: $0.key, minutes: minutes($0.seconds), billableMinutes: nil) }
-                    summary.totalMinutes = minutes(rows.reduce(0) { $0 + $1.seconds })
-                default:
-                    throw ToolError("unknown kind \"\(kind)\"; use activities, entries or unlogged")
+                if a.has("kind") {
+                    throw ToolError("summarize reports time entries only and takes no kind; use the evidence tool for activities or unlogged time")
                 }
-                return summary
+                let groupBy = try groupBy(a)
+                let interval = try range(a)
+                var f = try entryFilter(a)
+                f.status = nil
+                let summary = try store.summary(in: interval, groupBy: groupBy, filter: f,
+                                                includeDrafts: try a.bool("include_drafts") ?? false, now: now())
+                return SummaryView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, summary: summary)
+            },
+
+            Tool(
+                name: "evidence",
+                description: """
+                    Evidence for claiming time; never claimed time itself. \
+                    kind=activities (default): observed activity time in minutes per source (window, agent:*), never \
+                    summed across sources; group_by project, client, category, app, source or day. \
+                    kind=unlogged: work a suggestion would offer to claim (stretches where one project dominates, \
+                    agents excluded) not covered by a confirmed time entry; group_by project, client, category or day. \
+                    For claimed time use summarize.
+                    """,
+                inputSchema: schema(rangeProps.merging(activityFilterProps) { $1 }.merging([
+                    "kind": ["type": "string", "enum": ["activities", "unlogged"], "description": "Default: activities."],
+                    "group_by": ["type": "string", "enum": .array(Store.GroupBy.allCases.map { .string($0.rawValue) }),
+                                 "description": "Default: project."],
+                ]) { $1 }),
+                readOnly: true
+            ) { a, _ in
+                let groupBy = try groupBy(a)
+                let interval = try range(a)
+                switch try a.string("kind") ?? "activities" {
+                case "activities":
+                    let rows = try store.evidence(in: interval, groupBy: groupBy, filter: try activityFilter(a), now: now())
+                    return EvidenceTotalsView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, activities: rows)
+                case "unlogged":
+                    let unlogged = try store.unloggedTime(in: interval, groupBy: groupBy, now: now())
+                    return EvidenceTotalsView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, unlogged: unlogged)
+                case let kind:
+                    throw ToolError("unknown kind \"\(kind)\"; use activities or unlogged (time entries are in summarize)")
+                }
             },
 
             Tool(
@@ -723,41 +751,81 @@ struct Status: Encodable {
     }
 }
 
-struct SummaryGroup: Encodable {
+struct TimeGroupView: Encodable {
     var key: String
-    var minutesBySource: [String: Double]?
-    var minutes: Double?
+    var minutes: Double
     var billableMinutes: Double?
+    enum CodingKeys: String, CodingKey { case key, minutes, billableMinutes = "billable_minutes" }
+}
 
-    init(key: String, minutesBySource: [String: Double]) {
-        self.key = key
-        self.minutesBySource = minutesBySource
-    }
+/// A Summary: claimed time from time entries.
+struct SummaryView: Encodable {
+    var start: Date
+    var end: Date
+    var groupBy: String
+    var groups: [TimeGroupView]
+    var totalMinutes: Double
+    var billableMinutes: Double
+    /// Billable / total, or nil with no time.
+    var utilization: Double?
 
-    init(key: String, minutes: Double, billableMinutes: Double?) {
-        self.key = key
-        self.minutes = minutes
-        self.billableMinutes = billableMinutes
+    init(start: Date, end: Date, groupBy: String, summary: Store.Summary) {
+        self.start = start; self.end = end; self.groupBy = groupBy
+        groups = summary.groups.map {
+            TimeGroupView(key: $0.key, minutes: WaidTools.minutes($0.seconds), billableMinutes: WaidTools.minutes($0.billableSeconds))
+        }
+        totalMinutes = WaidTools.minutes(summary.seconds)
+        billableMinutes = WaidTools.minutes(summary.billableSeconds)
+        utilization = summary.utilization.map { ($0 * 1000).rounded() / 1000 }
     }
 
     enum CodingKeys: String, CodingKey {
-        case key, minutes, minutesBySource = "minutes_by_source", billableMinutes = "billable_minutes"
+        case start, end, groups, utilization, groupBy = "group_by", totalMinutes = "total_minutes"
+        case billableMinutes = "billable_minutes"
     }
 }
 
-struct Summary: Encodable {
+/// Evidence for claiming time: observed activity per source, or Unlogged time.
+struct EvidenceTotalsView: Encodable {
+    struct ActivityGroup: Encodable {
+        var key: String
+        var minutesBySource: [String: Double]
+        enum CodingKeys: String, CodingKey { case key, minutesBySource = "minutes_by_source" }
+    }
+
     var start: Date
     var end: Date
     var kind: String
     var groupBy: String
-    var groups: [SummaryGroup]
+    var activityGroups: [ActivityGroup]?
+    var unloggedGroups: [TimeGroupView]?
+    /// Unlogged time only: activity totals per source have no single total.
     var totalMinutes: Double?
-    var billableMinutes: Double?
-    /// Billable / total, for kind=entries.
-    var utilization: Double?
+
+    init(start: Date, end: Date, groupBy: String, activities: [Store.EvidenceRow]) {
+        self.start = start; self.end = end; self.groupBy = groupBy; kind = "activities"
+        activityGroups = activities.map { ActivityGroup(key: $0.key, minutesBySource: $0.secondsBySource.mapValues(WaidTools.minutes)) }
+    }
+
+    init(start: Date, end: Date, groupBy: String, unlogged: Store.UnloggedTime) {
+        self.start = start; self.end = end; self.groupBy = groupBy; kind = "unlogged"
+        unloggedGroups = unlogged.groups.map { TimeGroupView(key: $0.key, minutes: WaidTools.minutes($0.seconds)) }
+        totalMinutes = WaidTools.minutes(unlogged.seconds)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(start, forKey: .start)
+        try c.encode(end, forKey: .end)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(groupBy, forKey: .groupBy)
+        if let activityGroups { try c.encode(activityGroups, forKey: .groups) }
+        if let unloggedGroups { try c.encode(unloggedGroups, forKey: .groups) }
+        try c.encodeIfPresent(totalMinutes, forKey: .totalMinutes)
+    }
+
     enum CodingKeys: String, CodingKey {
-        case start, end, kind, groups, utilization, groupBy = "group_by", totalMinutes = "total_minutes"
-        case billableMinutes = "billable_minutes"
+        case start, end, kind, groups, groupBy = "group_by", totalMinutes = "total_minutes"
     }
 }
 

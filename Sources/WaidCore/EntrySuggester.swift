@@ -208,19 +208,37 @@ extension Store {
         }
     }
 
-    // MARK: Reports
+    // MARK: Summary
 
-    public struct EntrySummaryRow: Codable, Equatable, Sendable {
+    /// Time totals under one key, in exact seconds.
+    public struct TimeGroup: Codable, Equatable, Sendable {
         public var key: String
         public var seconds: Double
         public var billableSeconds: Double
     }
 
-    /// Confirmed entry time grouped by project, client, category or day (drafts optional).
-    public func entrySummary(
+    /// Time entry totals over a range: claimed time, never observed time.
+    public struct Summary: Codable, Equatable, Sendable {
+        public var groups: [TimeGroup]
+        /// The sum of the groups' seconds.
+        public var seconds: Double
+        public var billableSeconds: Double
+        /// Billable ÷ total, or nil when there is no time.
+        public var utilization: Double? { seconds > 0 ? billableSeconds / seconds : nil }
+
+        init(groups: [TimeGroup]) {
+            self.groups = groups
+            seconds = groups.reduce(0) { $0 + $1.seconds }
+            billableSeconds = groups.reduce(0) { $0 + $1.billableSeconds }
+        }
+    }
+
+    /// The Summary of confirmed time entries (drafts optional), grouped by
+    /// project, client, category or day.
+    public func summary(
         in range: DateInterval, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
         calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [EntrySummaryRow] {
+    ) throws -> Summary {
         guard [.project, .client, .category, .day].contains(groupBy) else {
             throw StoreError.invalid("time entries can be grouped by project, client, category or day, not \(groupBy.rawValue)")
         }
@@ -238,16 +256,32 @@ extension Store {
                 totals[key] = t
             }
         }
-        return Self.sorted(totals.map { EntrySummaryRow(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
-                           groupBy: groupBy)
+        return Summary(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
+                                           groupBy: groupBy))
     }
 
-    /// Attributed activity time that no confirmed entry covers: work that
-    /// happened but hasn't been logged.
-    public func unloggedSummary(
+    // MARK: Unlogged time
+
+    /// Unlogged time over a range: evidence for claiming, not claimed time.
+    public struct UnloggedTime: Codable, Equatable, Sendable {
+        public var groups: [TimeGroup]
+        /// The sum of the groups' seconds.
+        public var seconds: Double
+        public var billableSeconds: Double
+
+        init(groups: [TimeGroup]) {
+            self.groups = groups
+            seconds = groups.reduce(0) { $0 + $1.seconds }
+            billableSeconds = groups.reduce(0) { $0 + $1.billableSeconds }
+        }
+    }
+
+    /// Unlogged time: work a suggestion would offer to claim (buckets where one
+    /// project dominates, agents excluded) minus confirmed time entries.
+    public func unloggedTime(
         in range: DateInterval, groupBy: GroupBy, using suggester: EntrySuggester = EntrySuggester(),
         calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [EntrySummaryRow] {
+    ) throws -> UnloggedTime {
         guard [.project, .client, .category, .day].contains(groupBy) else {
             throw StoreError.invalid("unlogged time can be grouped by project, client, category or day, not \(groupBy.rawValue)")
         }
@@ -270,11 +304,11 @@ extension Store {
                 }
             }
         }
-        return Self.sorted(totals.map { EntrySummaryRow(key: $0.key, seconds: $0.value, billableSeconds: 0) },
-                           groupBy: groupBy)
+        return UnloggedTime(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value, billableSeconds: 0) },
+                                                groupBy: groupBy))
     }
 
-    private static func sorted(_ rows: [EntrySummaryRow], groupBy: GroupBy) -> [EntrySummaryRow] {
+    private static func sorted(_ rows: [TimeGroup], groupBy: GroupBy) -> [TimeGroup] {
         TimeAccounting.sorted(rows, groupBy: groupBy, key: \.key, seconds: \.seconds)
     }
 }
