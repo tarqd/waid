@@ -41,7 +41,7 @@ AX / AS     │                                         ▼     │
                                                     └────────── SwiftUI app (next)
 ```
 
-- `WaidCore`: `Database` (SQLite wrapper), `Store` (schema, queries, summaries), `ActivityRecorder` (merges samples into spans, trims idle time), `RuleEngine`, `TimeRange`, `ClaudeCodeIngestor`.
+- `WaidCore`: `Database` (SQLite wrapper), `Store` (schema, queries, summaries), `ActivityRecorder` (writes the focus, active and locked streams from samples and lock/sleep/wake/unlock signals), `RuleEngine`, `TimeRange`, `ClaudeCodeIngestor`.
 - `WaidCapture`: `MacActivitySampler`, the only macOS-specific code.
 - `WaidMCP`: `MCPServer` (JSON-RPC over stdio) and `WaidTools` (the tool surface).
 - `waid`: the CLI (`daemon`, `mcp`, `report`, `import`, `status`).
@@ -104,8 +104,11 @@ Days in every report are **local dates**: the date where you were when the time 
 
 ### Capture details
 
-- The front app is sampled every 5 s. A change of app, title, URL or document starts a new span, and the previous span is closed at the moment of the switch.
-- After 3 min idle, the span is trimmed back to the last input. Sleep, screen lock and gaps longer than 3× the interval close the span.
+- The front app is sampled every 5 s, and every sample, lock, sleep, wake and unlock is passed to the recorder with the system zone.
+- `focus`: a change of app, title, URL or document starts a new observation, and the previous one is closed at the moment of the switch. Gaps longer than 3× the interval close it at its last heartbeat. For now, after 3 min idle the focus observation is still trimmed back to the last input, until reports derive presence from the `active` stream.
+- `active`: extends while input was seen within one interval of a sample, and closes at the last input instant once it wasn't. The next input opens a new one.
+- `locked`: sleep, screens-did-sleep and session-resign close the open focus and active observations and open a locked one; did-wake, screens-did-wake and session-became-active close it. Sleep delivers no heartbeats, so closing on wake covers the gap.
+- Before an observation is extended past local midnight in the stamp zone, it is closed at that midnight and continued in a new one, so each has one local date. On start, the recorder closes whatever a previous run left open at its stored end.
 - Claude Code transcripts (`~/.claude/projects/**/*.jsonl`) become one span per active segment. Segments split on gaps over 15 min, and spans are titled from the session summary or first prompt, with the working directory stored as `path`.
 
 ## Roadmap
