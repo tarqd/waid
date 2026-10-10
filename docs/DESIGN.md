@@ -85,7 +85,7 @@ Two professional-services **Reports** sit on top of Summaries:
 - **Budget status**: confirmed hours against `budget_hours` per engagement, plus unconfirmed drafts, remaining hours and burn.
 - **Timesheet**: one row per day × project × category, with entry titles and notes as the billing narrative, exportable as CSV.
 
-Days in every report are **local dates**: the date where you were when the time happened, from the zone history waid records as you travel, not the zone the report runs in. A span crossing a zone change or local midnight is split, and each piece lands on its own local date. See `GLOSSARY.md` (Zone history, Local date) and [ADR-0001](adr/0001-zone-history.md).
+Days in every report are **local dates**: the date where you were when the time happened, from the zone history waid records as you travel, not the zone the report runs in. A span crossing a zone change or local midnight is split, and each piece lands on its own local date. See `GLOSSARY.md` (Zone history, Local date) and [ADR-0001](adr/0001-zone-history.md). Ranges agree with those day labels: named ranges (`today`, `this_week`, …) and date-only inputs select spans by local date, and weeks start on Monday whatever the locale. Explicit RFC 3339 timestamps select exact instants.
 
 ### Suggesting entries
 

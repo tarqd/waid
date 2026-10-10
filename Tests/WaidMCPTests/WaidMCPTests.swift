@@ -216,6 +216,22 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(status["unlogged_today_billable_minutes"], 60)
     }
 
+    func testRangesAreLocalDatesWhereYouAre() throws {
+        // now is Saturday 00:00 in Tokyo, still Friday in UTC.
+        try store.recordZone(TimeZone(identifier: "Asia/Tokyo")!, now: now - 7 * 86400)
+        let acme = try store.ensureProject("Acme / Phase 2")
+        for start in [now - 3600, now] {
+            try store.createEntry(NewTimeEntry(start: start, end: start + 1800, projectID: acme.id, origin: .manual), now: now)
+        }
+
+        let today = try call("summarize", ["range": "today", "group_by": "day"])
+        XCTAssertEqual(today["groups"], [["key": "2026-10-10", "minutes": 30, "billable_minutes": 30]])
+        let friday = try call("summarize", ["start": "2026-10-09", "end": "2026-10-09", "group_by": "day"])
+        XCTAssertEqual(friday["groups"], [["key": "2026-10-09", "minutes": 30, "billable_minutes": 30]])
+        let instants = try call("summarize", ["start": "2026-10-09T14:15:00Z", "end": "2026-10-09T15:15:00Z", "group_by": "day"])
+        XCTAssertEqual(instants["total_minutes"], 30)
+    }
+
     func testFiguresAreRoundedOnceAndTotalsComeFromSeconds() throws {
         let t = now.addingTimeInterval(-3 * 3600)
         let acme = try store.ensureProject("Acme / Phase 2")

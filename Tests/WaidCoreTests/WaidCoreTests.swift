@@ -152,12 +152,21 @@ final class TimeRangeTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/New_York")!
         let now = TimeRange.parseDate("2026-10-09T15:00:00-04:00")!
-        let today = try TimeRange.resolve(range: "today", start: nil, end: nil, now: now, calendar: calendar)
-        XCTAssertEqual(today.start, TimeRange.parseDate("2026-10-09T00:00:00-04:00"))
-        XCTAssertEqual(today.duration, 86400)
+        let oct9 = LocalDate(year: 2026, month: 10, day: 9)
+        XCTAssertEqual(try TimeRange.resolve(range: "today", start: nil, end: nil, now: now, calendar: calendar),
+                       .localDates(oct9...oct9))
+        XCTAssertEqual(try TimeRange.resolve(range: nil, start: nil, end: nil, now: now, calendar: calendar),
+                       .localDates(oct9...oct9))
+        XCTAssertEqual(try TimeRange.resolve(range: "this_month", start: nil, end: nil, now: now, calendar: calendar),
+                       .localDates(LocalDate("2026-10-01")!...LocalDate("2026-10-31")!))
 
-        let span = try TimeRange.resolve(range: nil, start: "2026-10-01", end: "2026-10-02", now: now, calendar: calendar)
-        XCTAssertEqual(span.duration, 2 * 86400, "bare end date is inclusive")
+        XCTAssertEqual(try TimeRange.resolve(range: nil, start: "2026-10-01", end: "2026-10-02", now: now, calendar: calendar),
+                       .localDates(LocalDate("2026-10-01")!...LocalDate("2026-10-02")!), "bare end date is inclusive")
+
+        XCTAssertEqual(
+            try TimeRange.resolve(range: nil, start: "2026-10-01T09:00:00+09:00", end: "2026-10-01T17:00:00Z", now: now, calendar: calendar),
+            .instants(DateInterval(start: TimeRange.parseDate("2026-10-01T00:00:00Z")!, end: TimeRange.parseDate("2026-10-01T17:00:00Z")!)),
+            "timestamps with an offset are instants")
 
         XCTAssertThrowsError(try TimeRange.resolve(range: "fortnight", start: nil, end: nil))
         XCTAssertThrowsError(try TimeRange.resolve(range: nil, start: "2026-10-02", end: "2026-10-01T00:00:00Z"))

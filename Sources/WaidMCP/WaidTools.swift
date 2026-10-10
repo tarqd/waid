@@ -48,9 +48,12 @@ public enum WaidTools {
 
         let rangeProps: [String: JSONValue] = [
             "range": ["type": "string", "enum": .array(TimeRange.names.map { .string($0) }),
-                      "description": "Named range. Takes precedence over start/end. Defaults to today."],
-            "start": ["type": "string", "description": "ISO 8601 date or datetime (inclusive)."],
-            "end": ["type": "string", "description": "ISO 8601 date (inclusive of that day) or datetime (exclusive)."],
+                      "description": """
+                        Named range of local dates (the date where you were, per the zone history); weeks start Monday. \
+                        Takes precedence over start/end. Defaults to today.
+                        """],
+            "start": ["type": "string", "description": "ISO 8601 date (selects by local date) or datetime (an exact instant, inclusive)."],
+            "end": ["type": "string", "description": "ISO 8601 date (selects by local date, inclusive of that day) or datetime (an exact instant, exclusive)."],
         ]
         let attributionFilterProps: [String: JSONValue] = [
             "project": ["type": "string", "description": "Only this project (\"Client / Project\" or plain name)."],
@@ -91,10 +94,17 @@ public enum WaidTools {
             ["type": "object", "properties": .object(props), "required": .array(required.map { .string($0) }),
              "additionalProperties": false]
         }
-        func range(_ a: Arguments) throws -> DateInterval {
+        /// Named ranges and dates select by local date; timestamps are instants.
+        func range(_ a: Arguments) throws -> ReportRange {
             do {
-                return try TimeRange.resolve(range: a.string("range"), start: a.string("start"), end: a.string("end"), now: now())
+                return try TimeRange.resolve(range: a.string("range"), start: a.string("start"), end: a.string("end"),
+                                             now: now(), calendar: try store.calendar(at: now()))
             } catch let e as TimeRange.ParseError { throw ToolError(e.description) }
+        }
+        /// The instants spanning `range(a)`, for listing spans and for reporting a range's bounds.
+        func instants(_ a: Arguments) throws -> DateInterval { try store.interval(covering: try range(a)) }
+        func named(_ name: String) throws -> ReportRange {
+            .localDates(TimeRange.named(name, today: LocalDate(now(), in: try store.calendar(at: now()).timeZone))!)
         }
         func groupBy(_ a: Arguments) throws -> Store.GroupBy {
             let name = try a.string("group_by") ?? "project"
@@ -184,7 +194,7 @@ public enum WaidTools {
                     try store.activities(in: DateInterval(start: a.start, end: max(a.end ?? now(), a.start + 1)), now: now())
                         .first { $0.id == a.id }
                 }
-                let unlogged = try store.unloggedTime(in: TimeRange.named("today", now: now())!, groupBy: .project, now: now())
+                let unlogged = try store.unloggedTime(in: try named("today"), groupBy: .project, now: now())
                 return Status(
                     now: now(),
                     current: current.map { ActivityView($0, now: now()) },
@@ -208,7 +218,7 @@ public enum WaidTools {
             ) { a, _ in
                 var f = try activityFilter(a)
                 f.limit = try a.int("limit") ?? 200
-                return try store.activities(in: try range(a), filter: f, now: now()).map { ActivityView($0, now: now()) }
+                return try store.activities(in: try instants(a), filter: f, now: now()).map { ActivityView($0, now: now()) }
             },
 
             Tool(
@@ -230,10 +240,10 @@ public enum WaidTools {
                     throw ToolError("summarize reports time entries only and takes no kind; use the evidence tool for activities or unlogged time")
                 }
                 let groupBy = try groupBy(a)
-                let interval = try range(a)
+                let selection = try range(a), interval = try store.interval(covering: selection)
                 var f = try entryFilter(a)
                 f.status = nil
-                let summary = try store.summary(in: interval, groupBy: groupBy, filter: f,
+                let summary = try store.summary(in: selection, groupBy: groupBy, filter: f,
                                                 includeDrafts: try a.bool("include_drafts") ?? false, now: now())
                 return SummaryView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, summary: summary)
             },
@@ -257,13 +267,13 @@ public enum WaidTools {
                 readOnly: true
             ) { a, _ in
                 let groupBy = try groupBy(a)
-                let interval = try range(a)
+                let selection = try range(a), interval = try store.interval(covering: selection)
                 switch try a.string("kind") ?? "activities" {
                 case "activities":
-                    let rows = try store.evidence(in: interval, groupBy: groupBy, filter: try activityFilter(a), now: now())
+                    let rows = try store.evidence(in: selection, groupBy: groupBy, filter: try activityFilter(a), now: now())
                     return EvidenceTotalsView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, activities: rows)
                 case "unlogged":
-                    let unlogged = try store.unloggedTime(in: interval, groupBy: groupBy, now: now())
+                    let unlogged = try store.unloggedTime(in: selection, groupBy: groupBy, now: now())
                     return EvidenceTotalsView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, unlogged: unlogged)
                 case let kind:
                     throw ToolError("unknown kind \"\(kind)\"; use activities or unlogged (time entries are in summarize)")
@@ -281,7 +291,7 @@ public enum WaidTools {
                 var f = Store.ActivityFilter()
                 f.uncategorizedOnly = true
                 var groups: [String: UncategorizedGroup] = [:]
-                for activity in try store.activities(in: try range(a), filter: f, now: now()) {
+                for activity in try store.activities(in: try instants(a), filter: f, now: now()) {
                     let (field, value): (String, String)
                     if let host = activity.url.flatMap({ URL(string: $0)?.host }) {
                         (field, value) = ("url", host)
@@ -451,7 +461,7 @@ public enum WaidTools {
                 guard let op = RuleOp(rawValue: opName) else { throw ToolError("unknown op \"\(opName)\"") }
                 let rule = try store.addRule(projectID: project, categoryID: category, field: field, op: op,
                                              pattern: try a.requiredString("pattern"), priority: try a.int("priority") ?? 0)
-                let recent = try store.activities(in: TimeRange.named("last_30_days", now: now())!, now: now())
+                let recent = try store.activities(in: try store.interval(covering: try named("last_30_days")), now: now())
                 let engine = RuleEngine(rules: try store.rules())
                 let decided = recent.filter { activity in
                     (project != nil && activity.assignedProjectID == nil && engine.projectRule(for: activity)?.id == rule.id)
@@ -482,7 +492,7 @@ public enum WaidTools {
                 ]) { $1 }),
                 readOnly: true
             ) { a, _ in
-                try store.timeEntries(in: try range(a), filter: try entryFilter(a), now: now()).map { EntryView($0, now: now()) }
+                try store.timeEntries(in: try instants(a), filter: try entryFilter(a), now: now()).map { EntryView($0, now: now()) }
             },
 
             Tool(
@@ -555,7 +565,7 @@ public enum WaidTools {
                     """,
                 inputSchema: schema(rangeProps.merging(suggestProps) { $1 })
             ) { a, ctx in
-                try store.suggestEntries(in: try range(a), using: try suggester(a), author: ctx.author, now: now()).map {
+                try store.suggestEntries(in: try instants(a), using: try suggester(a), author: ctx.author, now: now()).map {
                     SuggestionView(entry: EntryView($0.entry, now: now()),
                                    evidence: $0.evidence.map { EvidenceView(label: $0.label, minutes: minutes($0.seconds)) })
                 }

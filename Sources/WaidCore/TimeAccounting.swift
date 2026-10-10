@@ -36,6 +36,17 @@ enum TimeAccounting {
         return DateInterval(start: start, end: max(start, min(spanEnd, range.end)))
     }
 
+    /// The parts of a span that fall in any of `intervals`.
+    static func clip(start: Date, end: Date?, to intervals: [DateInterval], now: Date) -> [DateInterval] {
+        intervals.map { clip(start: start, end: end, to: $0, now: now) }.filter { $0.duration > 0 }
+    }
+
+    /// The smallest interval holding all of `intervals`, for picking spans to clip.
+    static func hull(_ intervals: [DateInterval]) -> DateInterval? {
+        guard let first = intervals.first, let last = intervals.last else { return nil }
+        return DateInterval(start: first.start, end: last.end)
+    }
+
     /// The keyed pieces of `interval` under `groupBy`. Day grouping splits by
     /// local date; every other grouping yields a single piece.
     static func pieces(
@@ -61,6 +72,32 @@ enum TimeAccounting {
 
         func zone(at date: Date) -> TimeZone {
             (history.last { $0.effectiveFrom <= date } ?? history.first)?.zone ?? fallback
+        }
+
+        /// The instants a report range covers, as disjoint intervals in order.
+        /// A run of local dates is usually one interval, but flying west can
+        /// repeat a date, and then it is more than one.
+        func intervals(_ range: ReportRange) -> [DateInterval] {
+            guard case .localDates(let dates) = range else {
+                if case .instants(let interval) = range { return [interval] }
+                return []
+            }
+            // Each zone holds from its change until the next; the first also covers all earlier time.
+            let zones = history.isEmpty ? [ZoneChange(zone: fallback, effectiveFrom: .distantPast)] : history
+            var result: [DateInterval] = []
+            for (i, change) in zones.enumerated() {
+                let from = i == 0 ? Date.distantPast : change.effectiveFrom
+                let until = i + 1 < zones.count ? zones[i + 1].effectiveFrom : .distantFuture
+                let start = max(from, dates.lowerBound.start(in: change.zone))
+                let end = min(until, dates.upperBound.adding(days: 1).start(in: change.zone))
+                guard start < end else { continue }
+                if let last = result.last, last.end == start {
+                    result[result.count - 1] = DateInterval(start: last.start, end: end)
+                } else {
+                    result.append(DateInterval(start: start, end: end))
+                }
+            }
+            return result
         }
 
         /// Splits an interval at zone changes, then each piece at its local

@@ -35,6 +35,25 @@ extension Store {
         return history.isEmpty ? nil : TimeAccounting.LocalDates(history: history, fallback: .current).zone(at: date)
     }
 
+    /// `calendar` set to the zone you were in at `now`, for resolving "today"
+    /// and other named ranges; unchanged when no zone has been recorded.
+    public func calendar(at now: Date, fallback calendar: Calendar = .current) throws -> Calendar {
+        var calendar = calendar
+        if let zone = try zone(at: now) { calendar.timeZone = zone }
+        return calendar
+    }
+
+    /// The instants `range` covers: exactly its instants, or the times whose
+    /// local date, per the zone history, falls in its dates. Disjoint, in order.
+    public func intervals(_ range: ReportRange, calendar: Calendar = .current) throws -> [DateInterval] {
+        try localDates(fallback: calendar).intervals(range)
+    }
+
+    /// One interval spanning all of `range`'s instants, for listing the spans in it.
+    public func interval(covering range: ReportRange, calendar: Calendar = .current) throws -> DateInterval {
+        TimeAccounting.hull(try intervals(range, calendar: calendar)) ?? DateInterval(start: Date(timeIntervalSince1970: 0), duration: 0)
+    }
+
     /// Local dates per the zone history, falling back to `calendar`'s zone
     /// only when nothing has been recorded yet.
     func localDates(fallback calendar: Calendar) throws -> TimeAccounting.LocalDates {

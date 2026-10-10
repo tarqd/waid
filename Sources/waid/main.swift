@@ -18,7 +18,8 @@ let usage = """
                                          Summary of confirmed time entries with billable time and
                                          utilization (default); --evidence shows observed activity per
                                          source (also --by app|source); --unlogged shows work not yet
-                                         claimed, with billable time (RANGE: \(TimeRange.names.joined(separator: ", ")))
+                                         claimed, with billable time (RANGE: \(TimeRange.names.joined(separator: ", "));
+                                         ranges are local dates where you were, weeks start Monday)
       waid timesheet [RANGE] [--client NAME]
                                          Confirmed entries as CSV, one row per day/project/category
       waid budgets                       Hours used vs budget per engagement
@@ -53,6 +54,14 @@ func openStore() -> (Store, String) {
     }
     reportZone(to: opened.0)
     return opened
+}
+
+/// The local dates a named range covers, counted from today where you are
+/// now per the zone history.
+func namedRange(_ name: String, store: Store) -> ReportRange? {
+    let now = Date()
+    let zone = ((try? store.calendar(at: now)) ?? .current).timeZone
+    return TimeRange.named(name, today: LocalDate(now, in: zone)).map(ReportRange.localDates)
 }
 
 /// Adds a zone-history record if the machine's zone has changed since the
@@ -138,7 +147,7 @@ case "report":
     let byName = option("--by") ?? "project"
     guard let groupBy = Store.GroupBy(rawValue: byName) else { fail("unknown --by \"\(byName)\"\n\n\(usage)") }
     let name = args.first { !$0.hasPrefix("--") } ?? "today"
-    guard let range = TimeRange.named(name) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
+    guard let range = namedRange(name, store: store) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
     func pad(_ s: String, _ n: Int) -> String { s.padding(toLength: n, withPad: " ", startingAt: 0) }
     do {
         if args.contains("--unlogged") {
@@ -182,7 +191,7 @@ case "timesheet":
     let (store, _) = openStore()
     let clientName = option("--client")
     let name = args.first ?? "this_week"
-    guard let range = TimeRange.named(name) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
+    guard let range = namedRange(name, store: store) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
     do {
         var filter = Store.EntryFilter()
         filter.clientID = try clientName.map { try store.requireClient(named: $0).id }

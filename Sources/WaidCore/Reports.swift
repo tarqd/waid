@@ -59,17 +59,18 @@ extension Store {
 
     /// One row per day × project × category, from confirmed entries.
     public func timesheet(
-        in range: DateInterval, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
+        in range: ReportRange, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> [TimesheetRow] {
         var filter = filter
         if !includeDrafts { filter.status = .confirmed }
         struct Key: Hashable { var date: String; var projectID: Int64?; var categoryID: Int64? }
         let dates = try localDates(fallback: calendar)
+        let intervals = dates.intervals(range)
         var rows: [Key: TimesheetRow] = [:]
-        for entry in try timeEntries(in: range, filter: filter, now: now) {
-            let clipped = TimeAccounting.clip(start: entry.start, end: entry.end, to: range, now: now)
-            for (date, seconds) in dates.split(clipped) where seconds > 0 {
+        for entry in try TimeAccounting.hull(intervals).map({ try timeEntries(in: $0, filter: filter, now: now) }) ?? [] {
+            let pieces = TimeAccounting.clip(start: entry.start, end: entry.end, to: intervals, now: now).flatMap(dates.split)
+            for (date, seconds) in pieces where seconds > 0 {
                 let key = Key(date: date, projectID: entry.projectID, categoryID: entry.categoryID)
                 var row = rows[key] ?? TimesheetRow(
                     date: date, client: entry.client, project: entry.project, category: entry.category,
@@ -86,6 +87,14 @@ extension Store {
             ($0.date, $0.client ?? "", $0.project ?? "", $0.category ?? "")
                 < ($1.date, $1.client ?? "", $1.project ?? "", $1.category ?? "")
         }
+    }
+
+    /// The timesheet over exact instants.
+    public func timesheet(
+        in range: DateInterval, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
+        calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [TimesheetRow] {
+        try timesheet(in: .instants(range), filter: filter, includeDrafts: includeDrafts, calendar: calendar, now: now)
     }
 
     /// CSV in the shape timesheet/PSA tools import: one row per day, project and category.
