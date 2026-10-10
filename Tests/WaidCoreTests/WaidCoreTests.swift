@@ -100,6 +100,51 @@ final class SummaryTests: XCTestCase {
     }
 }
 
+final class DaySplitTests: XCTestCase {
+    var calendar = Calendar(identifier: .gregorian)
+    var store: Store!
+    var midnight: Date!
+    var range: DateInterval { DateInterval(start: midnight - 86400, end: midnight + 86400) }
+    var now: Date { midnight + 6 * 3600 }
+
+    override func setUpWithError() throws {
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        store = try Store(path: ":memory:")
+        midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 9))!
+    }
+
+    func testEntrySummaryAndTimesheetSplitEntriesAtMidnight() throws {
+        let waid = try store.ensureProject("waid")
+        try store.createEntry(NewTimeEntry(start: midnight - 1800, end: midnight + 3600, projectID: waid.id,
+                                           title: "late night", origin: .manual), now: now)
+
+        let days = try store.entrySummary(in: range, groupBy: .day, calendar: calendar, now: now)
+        XCTAssertEqual(days.map(\.key), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(days.map(\.seconds), [1800, 3600])
+
+        let rows = try store.timesheet(in: range, calendar: calendar, now: now)
+        XCTAssertEqual(rows.map(\.date), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(rows.map(\.hours), [0.5, 1])
+        XCTAssertEqual(rows.map(\.notes), [["late night"], ["late night"]])
+    }
+
+    func testUnloggedSplitsAtMidnightAndGroupsByClient() throws {
+        let acme = try store.createProject(name: "Phase 2", clientID: try store.ensureClient(named: "Acme").id)
+        try store.addRule(projectID: acme.id, field: .appName, op: .equals, pattern: "Xcode")
+        try store.insertActivity(start: midnight - 1800, end: midnight + 3600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode", title: "acme"))
+
+        let days = try store.unloggedSummary(in: range, groupBy: .day, calendar: calendar, now: now)
+        XCTAssertEqual(days.map(\.key), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(days.map(\.seconds), [1800, 3600])
+
+        let clients = try store.unloggedSummary(in: range, groupBy: .client, calendar: calendar, now: now)
+        XCTAssertEqual(clients.map(\.key), ["Acme"])
+        XCTAssertEqual(clients.map(\.seconds), [5400])
+        XCTAssertEqual(try store.unloggedSummary(in: range, groupBy: .project, now: now).map(\.key), ["Acme / Phase 2"])
+    }
+}
+
 final class TimeRangeTests: XCTestCase {
     func testResolve() throws {
         var calendar = Calendar(identifier: .gregorian)

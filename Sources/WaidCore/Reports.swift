@@ -72,9 +72,8 @@ extension Store {
         struct Key: Hashable { var date: String; var projectID: Int64?; var categoryID: Int64? }
         var rows: [Key: TimesheetRow] = [:]
         for entry in try timeEntries(in: range, filter: filter, now: now) {
-            let start = max(entry.start, range.start)
-            let clipped = DateInterval(start: start, end: max(start, min(entry.end ?? max(now, entry.start), range.end)))
-            for (date, seconds) in Self.splitByDay(clipped, calendar: calendar) where seconds > 0 {
+            let clipped = TimeAccounting.clip(start: entry.start, end: entry.end, to: range, now: now)
+            for (date, seconds) in TimeAccounting.splitByDay(clipped, calendar: calendar) where seconds > 0 {
                 let key = Key(date: date, projectID: entry.projectID, categoryID: entry.categoryID)
                 var row = rows[key] ?? TimesheetRow(
                     date: date, client: entry.client, project: entry.project, category: entry.category,
