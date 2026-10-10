@@ -79,7 +79,7 @@ final class RuleTests: XCTestCase {
     }
 }
 
-final class SummaryTests: XCTestCase {
+final class EvidenceTests: XCTestCase {
     func testDayGroupingSplitsAtMidnightAndClipsToRange() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -89,13 +89,13 @@ final class SummaryTests: XCTestCase {
                                  sample: ActivitySample(appName: "Terminal"))
         try store.insertActivity(start: midnight, end: midnight + 600, source: Source.agent("claude-code"))
 
-        let rows = try store.summary(in: DateInterval(start: midnight - 86400, end: midnight + 86400),
+        let rows = try store.evidence(in: DateInterval(start: midnight - 86400, end: midnight + 86400),
                                      groupBy: .day, calendar: calendar)
         XCTAssertEqual(rows.map(\.key), ["2026-10-08", "2026-10-09"])
         XCTAssertEqual(rows[0].secondsBySource, ["window": 1800])
         XCTAssertEqual(rows[1].secondsBySource, ["window": 3600, "agent:claude-code": 600])
 
-        let clipped = try store.summary(in: DateInterval(start: midnight, duration: 1200), groupBy: .source)
+        let clipped = try store.evidence(in: DateInterval(start: midnight, duration: 1200), groupBy: .source)
         XCTAssertEqual(clipped.first { $0.key == "window" }?.secondsBySource["window"], 1200)
     }
 }
@@ -113,14 +113,15 @@ final class DaySplitTests: XCTestCase {
         midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 9))!
     }
 
-    func testEntrySummaryAndTimesheetSplitEntriesAtMidnight() throws {
+    func testSummaryAndTimesheetSplitEntriesAtMidnight() throws {
         let waid = try store.ensureProject("waid")
         try store.createEntry(NewTimeEntry(start: midnight - 1800, end: midnight + 3600, projectID: waid.id,
                                            title: "late night", origin: .manual), now: now)
 
-        let days = try store.entrySummary(in: range, groupBy: .day, calendar: calendar, now: now)
-        XCTAssertEqual(days.map(\.key), ["2026-10-08", "2026-10-09"])
-        XCTAssertEqual(days.map(\.seconds), [1800, 3600])
+        let days = try store.summary(in: range, groupBy: .day, calendar: calendar, now: now)
+        XCTAssertEqual(days.groups.map(\.key), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(days.groups.map(\.seconds), [1800, 3600])
+        XCTAssertEqual(days.seconds, 5400)
 
         let rows = try store.timesheet(in: range, calendar: calendar, now: now)
         XCTAssertEqual(rows.map(\.date), ["2026-10-08", "2026-10-09"])
@@ -134,14 +135,15 @@ final class DaySplitTests: XCTestCase {
         try store.insertActivity(start: midnight - 1800, end: midnight + 3600, source: Source.window,
                                  sample: ActivitySample(appName: "Xcode", title: "acme"))
 
-        let days = try store.unloggedSummary(in: range, groupBy: .day, calendar: calendar, now: now)
-        XCTAssertEqual(days.map(\.key), ["2026-10-08", "2026-10-09"])
-        XCTAssertEqual(days.map(\.seconds), [1800, 3600])
+        let days = try store.unloggedTime(in: range, groupBy: .day, calendar: calendar, now: now)
+        XCTAssertEqual(days.groups.map(\.key), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(days.groups.map(\.seconds), [1800, 3600])
+        XCTAssertEqual(days.seconds, 5400)
 
-        let clients = try store.unloggedSummary(in: range, groupBy: .client, calendar: calendar, now: now)
-        XCTAssertEqual(clients.map(\.key), ["Acme"])
-        XCTAssertEqual(clients.map(\.seconds), [5400])
-        XCTAssertEqual(try store.unloggedSummary(in: range, groupBy: .project, now: now).map(\.key), ["Acme / Phase 2"])
+        let clients = try store.unloggedTime(in: range, groupBy: .client, calendar: calendar, now: now)
+        XCTAssertEqual(clients.groups.map(\.key), ["Acme"])
+        XCTAssertEqual(clients.groups.map(\.seconds), [5400])
+        XCTAssertEqual(try store.unloggedTime(in: range, groupBy: .project, now: now).groups.map(\.key), ["Acme / Phase 2"])
     }
 }
 

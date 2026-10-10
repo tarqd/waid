@@ -45,6 +45,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(list["id"], "abc")
         guard case .array(let tools)? = list["result"]?["tools"] else { return XCTFail("no tools") }
         XCTAssertTrue(tools.contains { $0["name"] == "summarize" })
+        XCTAssertTrue(tools.contains { $0["name"] == "evidence" })
         XCTAssertTrue(tools.allSatisfy { $0["inputSchema"]?["type"] == "object" })
 
         XCTAssertEqual(try send(#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#)["error"]?["code"], -32601)
@@ -69,15 +70,24 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(created["matched_last_30_days"], 1)
         XCTAssertEqual(created["minutes_last_30_days"], 20)
 
-        let summary = try call("summarize", ["range": "today"])
-        guard case .array(let rows)? = summary["groups"] else { return XCTFail("\(summary)") }
+        let evidence = try call("evidence", ["range": "today"])
+        XCTAssertEqual(evidence["kind"], "activities")
+        guard case .array(let rows)? = evidence["groups"] else { return XCTFail("\(evidence)") }
         XCTAssertEqual(rows.first?["key"], "waid")
-        XCTAssertEqual(rows.first?["minutes_by_source"]?["window"], 20)
+        XCTAssertEqual(rows.first?["minutes_by_source"], ["window": 20])
+        XCTAssertNil(rows.first?["minutes"], "observed time is per source, never a single total")
         XCTAssertEqual(rows.last?["key"], "(no project)")
+        XCTAssertNil(evidence["total_minutes"])
+        XCTAssertEqual(try call("evidence", ["range": "today", "group_by": "app"])["groups"],
+                       [["key": "Safari", "minutes_by_source": ["window": 20]],
+                        ["key": "Terminal", "minutes_by_source": ["window": 10]]])
+
+        XCTAssertEqual(try call("summarize", ["range": "today"])["groups"], [], "activities are not claimed time")
 
         _ = try call("create_rule", ["field": "url", "op": "contains", "pattern": "x"], expectError: true)
         _ = try call("create_rule", ["category": "Nope", "field": "url", "op": "contains", "pattern": "x"], expectError: true)
         _ = try call("summarize", ["range": "fortnight"], expectError: true)
+        _ = try call("evidence", ["kind": "entries"], expectError: true)
     }
 
     func testTimersAndAgentWork() throws {
@@ -111,8 +121,11 @@ final class MCPServerTests: XCTestCase {
                                  sample: ActivitySample(appName: "Xcode", title: "Store.swift", path: "/src/waid/Store.swift"))
         _ = try call("create_rule", ["project": "waid", "field": "path", "op": "prefix", "pattern": "/src/waid"])
 
-        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "unlogged"])["groups"],
-                       [["key": "waid", "minutes": 60]])
+        let unlogged = try call("evidence", ["range": "today", "kind": "unlogged"])
+        XCTAssertEqual(unlogged["kind"], "unlogged")
+        XCTAssertEqual(unlogged["groups"], [["key": "waid", "minutes": 60]])
+        XCTAssertEqual(unlogged["total_minutes"], 60)
+        XCTAssertEqual(try call("get_status")["unlogged_today_minutes"], 60)
 
         let suggested = try call("suggest_time_entries", ["range": "today"])
         guard case .array(let drafts) = suggested, drafts.count == 1, let draft = drafts.first?["entry"] else {
@@ -122,21 +135,27 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(draft["author"], "agent:claude-code")
         XCTAssertEqual(draft["title"], "Store.swift")
         XCTAssertEqual(drafts.first?["evidence"], [["label": "Store.swift", "minutes": 60]])
-        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "entries"])["groups"], [])
+        XCTAssertEqual(try call("summarize", ["range": "today"])["groups"], [], "drafts excluded by default")
+        XCTAssertEqual(try call("summarize", ["range": "today", "include_drafts": true])["groups"],
+                       [["key": "waid", "minutes": 60, "billable_minutes": 0]])
 
         let id = try XCTUnwrap(draft["id"])
         let updated = try call("update_time_entry", ["id": id, "title": "Store refactor", "billable": true])
         XCTAssertEqual(updated["title"], "Store refactor")
         XCTAssertEqual(try call("confirm_time_entries", ["ids": [id]])["confirmed"], 1)
 
-        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "entries"])["groups"],
+        XCTAssertEqual(try call("summarize", ["range": "today"])["groups"],
                        [["key": "waid", "minutes": 60, "billable_minutes": 60]])
-        XCTAssertEqual(try call("summarize", ["range": "today", "kind": "unlogged"])["groups"], [])
+        XCTAssertEqual(try call("evidence", ["range": "today", "kind": "unlogged"])["groups"], [])
+        XCTAssertEqual(try call("get_status")["unlogged_today_minutes"], 0)
 
         let overlap = try call("create_time_entry", ["start": "2026-10-09T09:30:00Z", "end": "2026-10-09T10:30:00Z"],
                                expectError: true)
         XCTAssertTrue(overlap.stringValue?.contains("can't overlap") == true, "\(overlap)")
-        _ = try call("summarize", ["kind": "entries", "group_by": "app"], expectError: true)
+        _ = try call("summarize", ["group_by": "app"], expectError: true)
+        _ = try call("evidence", ["kind": "unlogged", "group_by": "source"], expectError: true)
+        let oldKind = try call("summarize", ["kind": "activities"], expectError: true)
+        XCTAssertTrue(oldKind.stringValue?.contains("evidence") == true, "\(oldKind)")
     }
 
     func testProfessionalServicesFlow() throws {
@@ -157,8 +176,10 @@ final class MCPServerTests: XCTestCase {
         _ = try call("create_time_entry", ["start": "2026-10-09T12:00:00Z", "end": "2026-10-09T13:00:00Z",
                                            "category": "Typo"], expectError: true)
 
-        let summary = try call("summarize", ["range": "today", "kind": "entries", "group_by": "client"])
+        let summary = try call("summarize", ["range": "today", "group_by": "client"])
         XCTAssertEqual(summary["utilization"], .number(0.5))
+        XCTAssertEqual(summary["total_minutes"], 120)
+        XCTAssertEqual(summary["billable_minutes"], 60)
         XCTAssertEqual(summary["groups"], [["key": "Acme", "minutes": 60, "billable_minutes": 60],
                                            ["key": "Beta", "minutes": 60, "billable_minutes": 0]])
 
@@ -185,7 +206,7 @@ final class MCPServerTests: XCTestCase {
                                                origin: .manual), now: now)
         }
 
-        let summary = try call("summarize", ["range": "today", "kind": "entries", "group_by": "category"])
+        let summary = try call("summarize", ["range": "today", "group_by": "category"])
         XCTAssertEqual(summary["groups"], [["key": "Implementation", "minutes": .number(20.3), "billable_minutes": .number(20.3)],
                                            ["key": "Meetings", "minutes": .number(20.3), "billable_minutes": .number(20.3)],
                                            ["key": "Presales", "minutes": .number(20.3), "billable_minutes": 0]])

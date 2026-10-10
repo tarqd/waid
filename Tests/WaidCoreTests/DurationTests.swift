@@ -24,7 +24,7 @@ final class DurationTests: XCTestCase {
                                  sample: ActivitySample(appName: "Xcode"))
         let listed = try store.activities(in: day, now: now)
         XCTAssertEqual(listed.map { $0.duration(now: now) }, [0])
-        XCTAssertEqual(try store.summary(in: day, groupBy: .app, now: now), [])
+        XCTAssertEqual(try store.evidence(in: day, groupBy: .app, now: now), [])
     }
 
     func testRunningSpansCountUpToNow() throws {
@@ -32,9 +32,9 @@ final class DurationTests: XCTestCase {
         let project = try store.ensureProject("Acme / Phase 2")
         try store.startTimer(projectID: project.id, now: t0 + 1800)
 
-        XCTAssertEqual(try store.summary(in: day, groupBy: .app, now: now).map(\.secondsBySource),
+        XCTAssertEqual(try store.evidence(in: day, groupBy: .app, now: now).map(\.secondsBySource),
                        [[Source.window: 2.0 * 3600]])
-        XCTAssertEqual(try store.entrySummary(in: day, groupBy: .project, now: now).map(\.seconds), [1.5 * 3600])
+        XCTAssertEqual(try store.summary(in: day, groupBy: .project, now: now).groups.map(\.seconds), [1.5 * 3600])
         XCTAssertEqual(try store.timesheet(in: day, now: now).map(\.hours), [1.5])
         XCTAssertEqual(try store.budgetStatus(projectIDs: [project.id], now: now).map(\.usedHours), [1.5])
     }
@@ -44,7 +44,7 @@ final class DurationTests: XCTestCase {
         try store.createEntry(NewTimeEntry(start: now + 3600, end: now + 2 * 3600, projectID: project.id,
                                            title: "steering meeting", origin: .manual), now: now)
 
-        XCTAssertEqual(try store.entrySummary(in: day, groupBy: .project, now: now).map(\.seconds), [3600])
+        XCTAssertEqual(try store.summary(in: day, groupBy: .project, now: now).groups.map(\.seconds), [3600])
         XCTAssertEqual(try store.timesheet(in: day, now: now).map(\.hours), [1])
         XCTAssertEqual(try store.budgetStatus(projectIDs: [project.id], now: now).map(\.usedHours), [1])
     }
@@ -94,10 +94,11 @@ final class DurationTests: XCTestCase {
         let total = 160.0 * 60 + 60
 
         for groupBy in [Store.GroupBy.project, .client, .category, .day] {
-            let rows = try store.entrySummary(in: range, groupBy: groupBy, calendar: utc, now: now)
-            XCTAssertEqual(rows.reduce(0) { $0 + $1.seconds }, total, "\(groupBy)")
+            let summary = try store.summary(in: range, groupBy: groupBy, calendar: utc, now: now)
+            XCTAssertEqual(summary.seconds, total, "\(groupBy)")
+            XCTAssertEqual(summary.groups.reduce(0) { $0 + $1.seconds }, total, "\(groupBy)")
         }
-        XCTAssertEqual(try store.entrySummary(in: range, groupBy: .day, calendar: utc, now: now).map(\.seconds),
+        XCTAssertEqual(try store.summary(in: range, groupBy: .day, calendar: utc, now: now).groups.map(\.seconds),
                        [80.0 * 60, 80.0 * 60 + 60])
         XCTAssertEqual(try store.timesheet(in: range, calendar: utc, now: now).reduce(0) { $0 + $1.hours }, total / 3600,
                        accuracy: 1e-9)

@@ -14,10 +14,11 @@ let usage = """
     USAGE:
       waid daemon [--interval SECONDS]   Track the frontmost app/window (macOS) and import agent sessions
       waid mcp                           Run the MCP server on stdio
-      waid report [RANGE] [--entries|--unlogged] [--by project|client|category|day]
-                                         Observed activities (default), confirmed time entries with
-                                         utilization, or activity not covered by any entry
-                                         (RANGE: \(TimeRange.names.joined(separator: ", ")))
+      waid report [RANGE] [--evidence|--unlogged] [--by project|client|category|day]
+                                         Summary of confirmed time entries with billable time and
+                                         utilization (default); --evidence shows observed activity per
+                                         source (also --by app|source); --unlogged shows work not yet
+                                         claimed (RANGE: \(TimeRange.names.joined(separator: ", ")))
       waid timesheet [RANGE] [--client NAME]
                                          Confirmed entries as CSV, one row per day/project/category
       waid budgets                       Hours used vs budget per engagement
@@ -140,26 +141,28 @@ case "report":
     guard let range = TimeRange.named(name) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
     func pad(_ s: String, _ n: Int) -> String { s.padding(toLength: n, withPad: " ", startingAt: 0) }
     do {
-        if args.contains("--entries") || args.contains("--unlogged") {
-            let entries = args.contains("--entries")
-            let rows = entries
-                ? try store.entrySummary(in: range, groupBy: groupBy)
-                : try store.unloggedSummary(in: range, groupBy: groupBy)
-            guard !rows.isEmpty else { print("nothing \(entries ? "logged" : "unlogged") \(name)"); break }
-            let width = max(12, rows.map(\.key.count).max() ?? 0)
-            print(pad(byName, width) + "  time      " + (entries ? "billable" : ""))
-            for row in rows {
-                print(pad(row.key, width) + "  " + pad(formatMinutes(row.seconds), 10)
-                      + (entries ? formatMinutes(row.billableSeconds) : ""))
-            }
-            if entries {
-                let total = rows.reduce(0) { $0 + $1.seconds }, billable = rows.reduce(0) { $0 + $1.billableSeconds }
-                print(pad("total", width) + "  " + pad(formatMinutes(total), 10) + formatMinutes(billable)
-                      + (total > 0 ? "  (\(Int((billable / total * 100).rounded()))% utilization)" : ""))
-            }
+        if args.contains("--unlogged") {
+            let unlogged = try store.unloggedTime(in: range, groupBy: groupBy)
+            guard !unlogged.groups.isEmpty else { print("nothing unlogged \(name)"); break }
+            let width = max(12, unlogged.groups.map(\.key.count).max() ?? 0)
+            print(pad(byName, width) + "  unlogged")
+            for group in unlogged.groups { print(pad(group.key, width) + "  " + formatMinutes(group.seconds)) }
+            print(pad("total", width) + "  " + formatMinutes(unlogged.seconds))
             break
         }
-        let rows = try store.summary(in: range, groupBy: groupBy)
+        guard args.contains("--evidence") else {
+            let summary = try store.summary(in: range, groupBy: groupBy)
+            guard !summary.groups.isEmpty else { print("nothing logged \(name)"); break }
+            let width = max(12, summary.groups.map(\.key.count).max() ?? 0)
+            print(pad(byName, width) + "  time      billable")
+            for group in summary.groups {
+                print(pad(group.key, width) + "  " + pad(formatMinutes(group.seconds), 10) + formatMinutes(group.billableSeconds))
+            }
+            print(pad("total", width) + "  " + pad(formatMinutes(summary.seconds), 10) + formatMinutes(summary.billableSeconds)
+                  + (summary.utilization.map { "  (\(Int(($0 * 100).rounded()))% utilization)" } ?? ""))
+            break
+        }
+        let rows = try store.evidence(in: range, groupBy: groupBy)
         let sources = Set(rows.flatMap { $0.secondsBySource.keys }).sorted()
         guard !rows.isEmpty else { print("nothing tracked \(name)"); break }
         let width = max(12, rows.map(\.key.count).max() ?? 0)

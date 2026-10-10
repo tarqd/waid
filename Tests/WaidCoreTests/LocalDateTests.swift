@@ -41,7 +41,7 @@ final class LocalDateTests: XCTestCase {
         XCTAssertEqual(timesheet.map(\.date), ["2026-10-06", "2026-10-08"])
         XCTAssertEqual(timesheet.map(\.hours), [2, 3])
 
-        let byDay = try store.entrySummary(in: week, groupBy: .day, calendar: newYorkCalendar, now: now)
+        let byDay = try store.summary(in: week, groupBy: .day, calendar: newYorkCalendar, now: now).groups
         XCTAssertEqual(byDay.map(\.key), ["2026-10-06", "2026-10-08"])
         XCTAssertEqual(byDay.map(\.seconds), [2.0 * 3600, 3.0 * 3600])
     }
@@ -60,11 +60,11 @@ final class LocalDateTests: XCTestCase {
                                  sample: ActivitySample(appName: "Mail"), projectID: project.id)
 
         // Tokyo: Fri 22-24 (2 h) + Sat 00-01 (1 h); New York: Fri 12-24 (12 h) + Sat 00-02 (2 h).
-        let evidence = try store.summary(in: week, groupBy: .day, calendar: utc, now: now)
+        let evidence = try store.evidence(in: week, groupBy: .day, calendar: utc, now: now)
         XCTAssertEqual(evidence.map(\.key), ["2026-10-09", "2026-10-10"])
         XCTAssertEqual(evidence.map { $0.secondsBySource[Source.window] }, [14.0 * 3600, 3.0 * 3600])
 
-        let unlogged = try store.unloggedSummary(in: week, groupBy: .day, calendar: utc, now: now)
+        let unlogged = try store.unloggedTime(in: week, groupBy: .day, calendar: utc, now: now).groups
         XCTAssertEqual(unlogged.map(\.key), ["2026-10-09", "2026-10-10"])
         XCTAssertEqual(unlogged.map(\.seconds), [14.0 * 3600, 3.0 * 3600])
     }

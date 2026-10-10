@@ -81,9 +81,9 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertNil(spans[1].project)
         XCTAssertEqual(spans[1].client, "Acme", "matched by domain without a project")
 
-        let byClient = try store.summary(in: day, groupBy: .client, now: now)
+        let byClient = try store.evidence(in: day, groupBy: .client, now: now)
         XCTAssertEqual(byClient.map(\.key), ["Acme"])
-        let byCategory = try store.summary(in: day, groupBy: .category, now: now)
+        let byCategory = try store.evidence(in: day, groupBy: .category, now: now)
         XCTAssertEqual(Set(byCategory.map(\.key)), ["Meetings", Store.noCategory])
     }
 
@@ -105,8 +105,9 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertEqual(drafts.map(\.billable), [true, true])
         XCTAssertEqual(drafts.first?.client, "Acme")
 
-        let unlogged = try store.unloggedSummary(in: day, groupBy: .category, now: now)
-        XCTAssertEqual(unlogged.map(\.key), ["Implementation", "Meetings"])
+        let unlogged = try store.unloggedTime(in: day, groupBy: .category, now: now)
+        XCTAssertEqual(unlogged.groups.map(\.key), ["Implementation", "Meetings"])
+        XCTAssertEqual(unlogged.seconds, 90 * 60, "matches the suggested drafts")
     }
 
     func testBudgetsAndTimesheet() throws {
@@ -133,9 +134,18 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertEqual(budgets[0].remainingHours ?? 0, 7, accuracy: 0.001)
         XCTAssertEqual(budgets[0].burn ?? 0, 0.3, accuracy: 0.001)
 
-        let utilization = try store.entrySummary(in: day, groupBy: .category, now: now)
-        XCTAssertEqual(utilization.map(\.key), ["Implementation", "Presales"])
-        XCTAssertEqual(utilization.map(\.billableSeconds), [3.0 * 3600, 0])
+        let summary = try store.summary(in: day, groupBy: .category, now: now)
+        XCTAssertEqual(summary.groups.map(\.key), ["Implementation", "Presales"])
+        XCTAssertEqual(summary.groups.map(\.billableSeconds), [3.0 * 3600, 0])
+        XCTAssertEqual(summary.seconds, 4 * 3600, "drafts excluded by default")
+        XCTAssertEqual(summary.billableSeconds, 3 * 3600)
+        XCTAssertEqual(summary.utilization, 0.75)
+
+        let withDrafts = try store.summary(in: day, groupBy: .category, includeDrafts: true, now: now)
+        XCTAssertEqual(withDrafts.seconds, 5.5 * 3600)
+        XCTAssertEqual(withDrafts.utilization ?? 0, 4.5 / 5.5, accuracy: 0.0001)
+        XCTAssertNil(try store.summary(in: DateInterval(start: t0 - 86400, duration: 3600), groupBy: .project, now: now).utilization,
+                     "no time, no utilization")
 
         let rows = try store.timesheet(in: day, now: now)
         XCTAssertEqual(rows.count, 2)
