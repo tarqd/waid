@@ -18,7 +18,7 @@ let usage = """
                                          Summary of confirmed time entries with billable time and
                                          utilization (default); --evidence shows observed activity per
                                          source (also --by app|source); --unlogged shows work not yet
-                                         claimed (RANGE: \(TimeRange.names.joined(separator: ", ")))
+                                         claimed, with billable time (RANGE: \(TimeRange.names.joined(separator: ", ")))
       waid timesheet [RANGE] [--client NAME]
                                          Confirmed entries as CSV, one row per day/project/category
       waid budgets                       Hours used vs budget per engagement
@@ -145,9 +145,11 @@ case "report":
             let unlogged = try store.unloggedTime(in: range, groupBy: groupBy)
             guard !unlogged.groups.isEmpty else { print("nothing unlogged \(name)"); break }
             let width = max(12, unlogged.groups.map(\.key.count).max() ?? 0)
-            print(pad(byName, width) + "  unlogged")
-            for group in unlogged.groups { print(pad(group.key, width) + "  " + formatMinutes(group.seconds)) }
-            print(pad("total", width) + "  " + formatMinutes(unlogged.seconds))
+            print(pad(byName, width) + "  unlogged  billable")
+            for group in unlogged.groups {
+                print(pad(group.key, width) + "  " + pad(formatMinutes(group.seconds), 10) + formatMinutes(group.billableSeconds))
+            }
+            print(pad("total", width) + "  " + pad(formatMinutes(unlogged.seconds), 10) + formatMinutes(unlogged.billableSeconds))
             break
         }
         guard args.contains("--evidence") else {

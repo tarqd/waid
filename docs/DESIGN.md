@@ -79,7 +79,7 @@ Claimed time:
 
 Evidence for claiming time (the `evidence` tool, `waid report --evidence|--unlogged`), never presented as claimed time:
 - **Evidence**: activity totals, where your time actually went, per source and never summed across sources (decision 7). Grouped by client, project, category, app, source or local date.
-- **Unlogged time**: work a suggestion would offer you to claim (stretches where one project dominates, agents excluded) that no confirmed entry covers ("3 h on Acme you haven't logged"). Grouped by client, project, category or local date.
+- **Unlogged time**: work a suggestion would offer you to claim (stretches where one project dominates, agents excluded) that no confirmed entry covers ("3 h on Acme you haven't logged, 2.5 h of it billable"). Billable follows the project and category, as for time entries (#18). Grouped by client, project, category or local date.
 
 Two professional-services **Reports** sit on top of Summaries:
 - **Budget status**: confirmed hours against `budget_hours` per engagement, plus unconfirmed drafts, remaining hours and burn.
