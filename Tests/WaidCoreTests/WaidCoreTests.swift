@@ -170,6 +170,22 @@ final class RecorderStreamTests: XCTestCase {
         XCTAssertEqual(locked.map { [$0.start, $0.end].map { $0.timeIntervalSince(midnight) } }, [[86000, 86400], [86400, 87000]])
         XCTAssertEqual(locked.map(\.localDate), ["2026-10-10", "2026-10-11"])
     }
+
+    func testInputEndingBeforeMidnightLeavesNoEmptyActiveObservationAfterIt() throws {
+        let midnight = TimeRange.parseDate("2026-10-10T00:00:00Z")!
+        let utc = TimeZone(identifier: "UTC")!
+        let recorder = ActivityRecorder(store: store, interval: 5)
+        try recorder.record(.sample(editor), at: midnight - 5, zone: utc)
+        try recorder.record(.sample(editor), at: midnight + 3, zone: utc)
+        // The next sample says input stopped 2 s before midnight.
+        var idle = editor
+        idle.idleSeconds = 10
+        try recorder.record(.sample(idle), at: midnight + 8, zone: utc)
+
+        let active = try store.observations(.active, in: DateInterval(start: midnight - 60, duration: 120))
+        XCTAssertEqual(active.map { [$0.start, $0.end].map { $0.timeIntervalSince(midnight) } }, [[-5, 0]])
+        XCTAssertEqual(active.map(\.open), [false])
+    }
 }
 
 final class RuleTests: XCTestCase {

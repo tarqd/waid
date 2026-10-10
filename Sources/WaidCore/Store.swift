@@ -336,6 +336,12 @@ public final class Store {
         try db.run("UPDATE observations SET end_ts = ?, open = 0 WHERE id = ? AND open = 1", [end, observationID])
     }
 
+    /// Deletes an open observation, for one that turns out to hold no time.
+    /// A closed one is evidence and stays.
+    public func discard(observationID: Int64) throws {
+        try db.run("DELETE FROM observations WHERE id = ? AND open = 1", [observationID])
+    }
+
     /// Closes every observation still open at its last heartbeat, as after a
     /// restart. Returns how many were closed.
     @discardableResult

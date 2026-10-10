@@ -149,11 +149,16 @@ public final class ActivityRecorder {
         open.end = instant
     }
 
-    /// Closes `open` at `end` (never before its start), first continuing it
-    /// past any local midnight before `end`.
+    /// Closes `open` at `end`, first continuing it past any local midnight
+    /// before `end`. An `end` before its start means it never held any time,
+    /// as when input stopped before the midnight it was continued at, so it
+    /// is deleted instead.
     private func close(_ open: inout Open, at end: Date, zone: TimeZone) throws {
         if end > open.end { try splitAtMidnight(&open, before: end, zone: zone) }
-        let end = max(open.start, end)
+        guard end >= open.start else {
+            try store.discard(observationID: open.id)
+            return
+        }
         try store.close(observationID: open.id, end: end)
         open.end = end
     }
