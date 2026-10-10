@@ -105,4 +105,31 @@ final class ReportRangeTests: XCTestCase {
         XCTAssertEqual(unlogged.seconds, 13.0 * 3600)
         XCTAssertEqual(try store.timesheet(in: friday, calendar: newYorkCalendar, now: now).map(\.hours), [1])
     }
+
+    func testSpansAreListedAndSuggestedOnlyOnTheirLocalDateWhenADateRepeats() throws {
+        try store.recordZone(tokyo, now: TimeRange.parseDate("2026-10-01T00:00:00+09:00")!)
+        // Noticed the flight home at Saturday 01:00 in Tokyo, which is Friday 12:00 in New York.
+        try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-10T01:00:00+09:00")!)
+        let acme = try store.ensureProject("Acme / Phase 2")
+        // Saturday 00:00-00:40 in Tokyo: after Friday in Tokyo, before Friday resumes in New York.
+        try store.insertActivity(start: TimeRange.parseDate("2026-10-10T00:00:00+09:00")!,
+                                 end: TimeRange.parseDate("2026-10-10T00:40:00+09:00")!, source: Source.window,
+                                 sample: ActivitySample(appName: "Mail"), projectID: acme.id)
+        try entry("2026-10-10T00:45:00+09:00", "2026-10-10T00:55:00+09:00", project: acme)
+
+        let friday = ReportRange.localDates(LocalDate("2026-10-09")!...LocalDate("2026-10-09")!)
+        XCTAssertEqual(try store.activities(in: friday, calendar: newYorkCalendar, now: now).count, 0)
+        XCTAssertEqual(try store.timeEntries(in: friday, calendar: newYorkCalendar, now: now).count, 0)
+        XCTAssertEqual(try store.unloggedTime(in: friday, groupBy: .day, calendar: newYorkCalendar, now: now).seconds, 0)
+        XCTAssertEqual(try store.suggestEntries(in: friday, calendar: newYorkCalendar, now: now).count, 0)
+
+        let saturday = ReportRange.localDates(LocalDate("2026-10-10")!...LocalDate("2026-10-10")!)
+        XCTAssertEqual(try store.activities(in: saturday, calendar: newYorkCalendar, now: now).count, 1)
+        XCTAssertEqual(try store.timeEntries(in: saturday, calendar: newYorkCalendar, now: now).count, 1)
+        // Unlogged time is what a suggestion would offer.
+        let unlogged = try store.unloggedTime(in: saturday, groupBy: .day, calendar: newYorkCalendar, now: now)
+        let suggested = try store.suggestEntries(in: saturday, calendar: newYorkCalendar, now: now)
+        XCTAssertEqual(unlogged.seconds, 40 * 60)
+        XCTAssertEqual(suggested.map { $0.entry.duration(now: now) }, [40.0 * 60])
+    }
 }

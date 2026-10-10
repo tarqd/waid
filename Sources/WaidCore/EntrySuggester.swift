@@ -26,7 +26,9 @@ public struct EntrySuggester: Sendable {
         public var categoryID: Int64?
     }
 
-    public struct Evidence: Codable, Equatable, Sendable {
+    /// A title or app that contributed time to a suggested block. Not
+    /// Evidence in the GLOSSARY.md sense, which is activity totals over a range.
+    public struct Contributor: Codable, Equatable, Sendable {
         public var label: String
         public var seconds: Double
     }
@@ -37,7 +39,7 @@ public struct EntrySuggester: Sendable {
         public var end: Date
         public var title: String?
         /// The biggest contributors (titles or apps) by time.
-        public var evidence: [Evidence] = []
+        public var contributors: [Contributor] = []
     }
 
     func eligible(_ activity: Activity) -> Bool {
@@ -136,29 +138,29 @@ public struct EntrySuggester: Sendable {
         }
         return free.filter { $0.end.timeIntervalSince($0.start) >= minDuration }.map { block in
             var block = block
-            block.evidence = evidence(for: block, from: activities)
-            block.title = Self.title(from: block.evidence)
+            block.contributors = contributors(to: block, from: activities)
+            block.title = Self.title(from: block.contributors)
             return block
         }
     }
 
-    private func evidence(for block: Block, from activities: [Activity]) -> [Evidence] {
+    private func contributors(to block: Block, from activities: [Activity]) -> [Contributor] {
         var totals: [String: Double] = [:]
         for activity in activities where eligible(activity) && activity.projectID == block.label.projectID {
             let overlap = min(activity.end ?? block.end, block.end).timeIntervalSince(max(activity.start, block.start))
             guard overlap > 0 else { continue }
             totals[activity.title ?? activity.appName ?? activity.source, default: 0] += overlap
         }
-        let all = totals.map { Evidence(label: $0.key, seconds: $0.value) }
+        let all = totals.map { Contributor(label: $0.key, seconds: $0.value) }
         let ranked = all.sorted { a, b in a.seconds != b.seconds ? a.seconds > b.seconds : a.label < b.label }
         return Array(ranked.prefix(5))
     }
 
     /// The top title, plus the runner-up when it's a substantial share.
-    static func title(from evidence: [Evidence]) -> String? {
-        guard let first = evidence.first else { return nil }
+    static func title(from contributors: [Contributor]) -> String? {
+        guard let first = contributors.first else { return nil }
         var title = first.label
-        if evidence.count > 1, evidence[1].seconds >= first.seconds / 4 { title += " · " + evidence[1].label }
+        if contributors.count > 1, contributors[1].seconds >= first.seconds / 4 { title += " · " + contributors[1].label }
         return title.count <= 100 ? title : String(title.prefix(99)) + "…"
     }
 
@@ -180,35 +182,59 @@ public struct EntrySuggester: Sendable {
 extension Store {
     public struct Suggestion: Sendable {
         public var entry: TimeEntry
-        public var evidence: [EntrySuggester.Evidence]
+        /// The titles or apps that contributed most to the suggestion.
+        public var contributors: [EntrySuggester.Contributor]
     }
 
-    /// Replaces earlier suggested drafts in `range` with fresh ones. Confirmed
-    /// entries and drafts the user created are left alone and never overlapped.
+    /// Replaces earlier suggested drafts on `range`'s local dates (or in its
+    /// instants) with fresh ones. Confirmed entries and drafts the user created
+    /// are left alone and never overlapped. When a local date repeats, each of
+    /// its stretches is suggested for on its own, and the gap between them,
+    /// which belongs to another date, is left alone.
+    public func suggestEntries(
+        in range: ReportRange, using suggester: EntrySuggester = EntrySuggester(),
+        author: String = "user", calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [Suggestion] {
+        try suggestEntries(in: try intervals(range, calendar: calendar), using: suggester, author: author, now: now)
+    }
+
+    /// Replaces earlier suggested drafts in `range` with fresh ones.
     public func suggestEntries(
         in range: DateInterval, using suggester: EntrySuggester = EntrySuggester(),
         author: String = "user", now: Date = Date()
     ) throws -> [Suggestion] {
-        let range = DateInterval(start: range.start, end: max(range.start, min(range.end, now)))
-        return try db.transaction {
-            try db.run(
-                "DELETE FROM time_entries WHERE origin = ? AND status = ? AND start_ts < ? AND end_ts > ?",
-                [EntryOrigin.suggested.rawValue, EntryStatus.draft.rawValue, range.end, range.start])
-            let occupied = try timeEntries(in: range, now: now).map {
-                DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
-            }
-            let blocks = suggester.blocks(from: try activities(in: range, now: now), in: range, avoiding: occupied)
-            return try blocks.map { block in
-                var new = NewTimeEntry(start: block.start, end: block.end, projectID: block.label.projectID,
-                                       categoryID: block.label.categoryID, title: block.title, origin: .suggested)
-                new.status = .draft
-                new.author = author
-                return Suggestion(entry: try insertEntry(new, now: now), evidence: block.evidence)
+        try suggestEntries(in: [range], using: suggester, author: author, now: now)
+    }
+
+    private func suggestEntries(
+        in intervals: [DateInterval], using suggester: EntrySuggester, author: String, now: Date
+    ) throws -> [Suggestion] {
+        try db.transaction {
+            try Self.untilNow(intervals, now: now).flatMap { range in
+                try db.run(
+                    "DELETE FROM time_entries WHERE origin = ? AND status = ? AND start_ts < ? AND end_ts > ?",
+                    [EntryOrigin.suggested.rawValue, EntryStatus.draft.rawValue, range.end, range.start])
+                let occupied = try timeEntries(in: range, now: now).map {
+                    DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
+                }
+                let blocks = suggester.blocks(from: try activities(in: range, now: now), in: range, avoiding: occupied)
+                return try blocks.map { block in
+                    var new = NewTimeEntry(start: block.start, end: block.end, projectID: block.label.projectID,
+                                           categoryID: block.label.categoryID, title: block.title, origin: .suggested)
+                    new.status = .draft
+                    new.author = author
+                    return Suggestion(entry: try insertEntry(new, now: now), contributors: block.contributors)
+                }
             }
         }
     }
 
-    // MARK: Summary
+    /// The parts of `intervals` up to `now`: nothing later can be suggested or unlogged yet.
+    private static func untilNow(_ intervals: [DateInterval], now: Date) -> [DateInterval] {
+        intervals.compactMap { $0.start < now ? DateInterval(start: $0.start, end: min($0.end, now)) : nil }
+    }
+
+    // MARK: Summary and Unlogged time
 
     /// Time totals under one key, in exact seconds.
     public struct TimeGroup: Codable, Equatable, Sendable {
@@ -217,8 +243,8 @@ extension Store {
         public var billableSeconds: Double
     }
 
-    /// Time entry totals over a range: claimed time, never observed time.
-    public struct Summary: Codable, Equatable, Sendable {
+    /// Grouped time totals over a range, in exact seconds, with the billable split.
+    public struct TimeTotals: Codable, Equatable, Sendable {
         public var groups: [TimeGroup]
         /// The sum of the groups' seconds.
         public var seconds: Double
@@ -226,10 +252,25 @@ extension Store {
         /// Billable ÷ total, or nil when there is no time.
         public var utilization: Double? { seconds > 0 ? billableSeconds / seconds : nil }
 
-        init(groups: [TimeGroup]) {
-            self.groups = groups
+        init(_ tally: TimeAccounting.Tally<String>, groupBy: GroupBy) {
+            groups = tally.groups(groupBy)
             seconds = groups.reduce(0) { $0 + $1.seconds }
             billableSeconds = groups.reduce(0) { $0 + $1.billableSeconds }
+        }
+    }
+
+    /// Time entry totals over a range: claimed time, never observed time.
+    public typealias Summary = TimeTotals
+
+    /// Unlogged time over a range: evidence for claiming, not claimed time.
+    /// Its utilization is the billable share of what is left to claim.
+    public typealias UnloggedTime = TimeTotals
+
+    /// Summaries and Unlogged time are about time you claim or could claim,
+    /// which has no app or source.
+    private static func requireTimeGrouping(_ groupBy: GroupBy, for what: String) throws {
+        guard [.project, .client, .category, .day].contains(groupBy) else {
+            throw StoreError.invalid("\(what) can be grouped by project, client, category or day, not \(groupBy.rawValue)")
         }
     }
 
@@ -239,67 +280,30 @@ extension Store {
         in range: ReportRange, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> Summary {
-        guard [.project, .client, .category, .day].contains(groupBy) else {
-            throw StoreError.invalid("time entries can be grouped by project, client, category or day, not \(groupBy.rawValue)")
-        }
-        let filter = filter.counting(drafts: includeDrafts)
+        try Self.requireTimeGrouping(groupBy, for: "time entries")
         let dates = try localDates(fallback: calendar)
         let intervals = dates.intervals(range)
-        var totals: [String: (Double, Double)] = [:]
-        for entry in try TimeAccounting.hull(intervals).map({ try timeEntries(in: $0, filter: filter, now: now) }) ?? [] {
-            let labels = TimeAccounting.Labels(project: entry.project, client: entry.client, category: entry.category)
+        var tally = TimeAccounting.Tally<String>()
+        for entry in try timeEntries(overlapping: intervals, filter: filter.counting(drafts: includeDrafts), now: now) {
+            let keys = TimeAccounting.GroupKeys(project: entry.project, client: entry.client, category: entry.category)
             for clipped in TimeAccounting.clip(start: entry.start, end: entry.end, to: intervals, now: now) {
-                for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
-                where seconds > 0 {
-                    var t = totals[key] ?? (0, 0)
-                    t.0 += seconds
-                    if entry.billable { t.1 += seconds }
-                    totals[key] = t
-                }
+                tally.add(clipped, groupBy: groupBy, keys: keys, dates: dates, billable: entry.billable)
             }
         }
-        return Summary(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
-                                           groupBy: groupBy))
-    }
-
-    /// The Summary over exact instants.
-    public func summary(
-        in range: DateInterval, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
-        calendar: Calendar = .current, now: Date = Date()
-    ) throws -> Summary {
-        try summary(in: .instants(range), groupBy: groupBy, filter: filter, includeDrafts: includeDrafts,
-                    calendar: calendar, now: now)
-    }
-
-    // MARK: Unlogged time
-
-    /// Unlogged time over a range: evidence for claiming, not claimed time.
-    public struct UnloggedTime: Codable, Equatable, Sendable {
-        public var groups: [TimeGroup]
-        /// The sum of the groups' seconds.
-        public var seconds: Double
-        public var billableSeconds: Double
-
-        init(groups: [TimeGroup]) {
-            self.groups = groups
-            seconds = groups.reduce(0) { $0 + $1.seconds }
-            billableSeconds = groups.reduce(0) { $0 + $1.billableSeconds }
-        }
+        return Summary(tally, groupBy: groupBy)
     }
 
     /// Unlogged time: work a suggestion would offer to claim (buckets where one
     /// project dominates, agents excluded) minus confirmed time entries.
-    /// Project, client and category filters match the bucket's label; text and
-    /// sources don't apply to a bucket and are rejected. Billable seconds follow
-    /// the bucket label's project and category, by the same rule as time entries
-    /// (`Catalog.defaultBillable`).
+    /// Project, client and category filters match the bucket's label; text,
+    /// sources and uncategorized-only don't apply to a bucket and are rejected.
+    /// Billable seconds follow the bucket label's project and category, by the
+    /// same rule as time entries (`Catalog.defaultBillable`).
     public func unloggedTime(
         in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
     ) throws -> UnloggedTime {
-        guard [.project, .client, .category, .day].contains(groupBy) else {
-            throw StoreError.invalid("unlogged time can be grouped by project, client, category or day, not \(groupBy.rawValue)")
-        }
+        try Self.requireTimeGrouping(groupBy, for: "unlogged time")
         let unsupported = [
             ("text", filter.text.map { !$0.isEmpty } ?? false),
             ("sources", filter.sources.map { !$0.isEmpty } ?? false),
@@ -310,53 +314,33 @@ extension Store {
                 + "it can be filtered by project, client or category")
         }
         let dates = try localDates(fallback: calendar)
-        // Nothing after now is unlogged yet.
-        let intervals = dates.intervals(range).compactMap { i in
-            i.start < now ? DateInterval(start: i.start, end: min(i.end, now)) : nil
-        }
-        guard let range = TimeAccounting.hull(intervals) else { return UnloggedTime(groups: []) }
+        let intervals = Self.untilNow(dates.intervals(range), now: now)
         var confirmed = EntryFilter()
         confirmed.status = .confirmed
-        let covered = try timeEntries(in: range, filter: confirmed, now: now).map {
+        let covered = try timeEntries(overlapping: intervals, filter: confirmed, now: now).map {
             DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
         }
         let catalog = try catalog()
-        var totals: [String: (Double, Double)] = [:]
         var observed = ActivityFilter()
         observed.includeHidden = filter.includeHidden
-        for (bucket, label) in suggester.labeledBuckets(try activities(in: range, filter: observed, now: now), range: range) {
-            let project = catalog.projects[label.projectID]
-            if let projectID = filter.projectID, label.projectID != projectID { continue }
-            if let clientID = filter.clientID, project?.clientID != clientID { continue }
-            if let categoryID = filter.categoryID, label.categoryID != categoryID { continue }
-            let labels = TimeAccounting.Labels(
-                project: project?.path ?? "#\(label.projectID)", client: project?.client,
-                category: label.categoryID.flatMap { catalog.categories[$0]?.name })
-            let billable = catalog.defaultBillable(projectID: label.projectID, categoryID: label.categoryID)
-            for uncovered in EntrySuggester.subtract(covered, from: bucket) {
-                for piece in TimeAccounting.clip(start: uncovered.start, end: uncovered.end, to: intervals, now: now) {
-                    for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, dates: dates) {
-                        var t = totals[key] ?? (0, 0)
-                        t.0 += seconds
-                        if billable { t.1 += seconds }
-                        totals[key] = t
-                    }
+        var tally = TimeAccounting.Tally<String>()
+        // Buckets are laid out per stretch, as suggestEntries lays them out.
+        for interval in intervals {
+            let activities = try activities(in: interval, filter: observed, now: now)
+            for (bucket, label) in suggester.labeledBuckets(activities, range: interval) {
+                let project = catalog.projects[label.projectID]
+                if let projectID = filter.projectID, label.projectID != projectID { continue }
+                if let clientID = filter.clientID, project?.clientID != clientID { continue }
+                if let categoryID = filter.categoryID, label.categoryID != categoryID { continue }
+                let keys = TimeAccounting.GroupKeys(
+                    project: project?.path ?? "#\(label.projectID)", client: project?.client,
+                    category: label.categoryID.flatMap { catalog.categories[$0]?.name })
+                let billable = catalog.defaultBillable(projectID: label.projectID, categoryID: label.categoryID)
+                for uncovered in EntrySuggester.subtract(covered, from: bucket) {
+                    tally.add(uncovered, groupBy: groupBy, keys: keys, dates: dates, billable: billable)
                 }
             }
         }
-        return UnloggedTime(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
-                                                groupBy: groupBy))
-    }
-
-    /// Unlogged time over exact instants.
-    public func unloggedTime(
-        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
-        using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
-    ) throws -> UnloggedTime {
-        try unloggedTime(in: .instants(range), groupBy: groupBy, filter: filter, using: suggester, calendar: calendar, now: now)
-    }
-
-    private static func sorted(_ rows: [TimeGroup], groupBy: GroupBy) -> [TimeGroup] {
-        TimeAccounting.sorted(rows, groupBy: groupBy, key: \.key, seconds: \.seconds)
+        return UnloggedTime(tally, groupBy: groupBy)
     }
 }

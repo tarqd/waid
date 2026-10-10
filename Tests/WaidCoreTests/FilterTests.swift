@@ -59,7 +59,7 @@ final class FilterTests: XCTestCase {
         try unloggedDay()
         var f = Store.ActivityFilter()
         f.projectID = acme.id
-        let unlogged = try store.unloggedTime(in: day, groupBy: .project, filter: f, now: now)
+        let unlogged = try store.unloggedTime(in: .instants(day), groupBy: .project, filter: f, now: now)
         XCTAssertEqual(unlogged.groups.map(\.key), ["Acme / Phase 2"])
         XCTAssertEqual(unlogged.seconds, 90 * 60)
     }
@@ -68,7 +68,7 @@ final class FilterTests: XCTestCase {
         try unloggedDay()
         var f = Store.ActivityFilter()
         f.clientID = beta.clientID
-        let unlogged = try store.unloggedTime(in: day, groupBy: .project, filter: f, now: now)
+        let unlogged = try store.unloggedTime(in: .instants(day), groupBy: .project, filter: f, now: now)
         XCTAssertEqual(unlogged.groups.map(\.key), ["Beta / Rollout"])
         XCTAssertEqual(unlogged.seconds, 20 * 60)
     }
@@ -77,7 +77,7 @@ final class FilterTests: XCTestCase {
         try unloggedDay()
         var f = Store.ActivityFilter()
         f.categoryID = implementation.id
-        let unlogged = try store.unloggedTime(in: day, groupBy: .project, filter: f, now: now)
+        let unlogged = try store.unloggedTime(in: .instants(day), groupBy: .project, filter: f, now: now)
         XCTAssertEqual(unlogged.groups.map(\.key), ["Acme / Phase 2", "waid", "Beta / Rollout"])
         XCTAssertEqual(unlogged.groups.map(\.seconds), [3600.0, 2400, 1200])
     }
@@ -86,22 +86,22 @@ final class FilterTests: XCTestCase {
         try unloggedDay()
         var text = Store.ActivityFilter()
         text.text = "code"
-        XCTAssertThrowsError(try store.unloggedTime(in: day, groupBy: .project, filter: text, now: now)) {
+        XCTAssertThrowsError(try store.unloggedTime(in: .instants(day), groupBy: .project, filter: text, now: now)) {
             XCTAssertTrue("\($0)".contains("text"), "\($0)")
         }
         var sources = Store.ActivityFilter()
         sources.sources = [Source.window]
-        XCTAssertThrowsError(try store.unloggedTime(in: day, groupBy: .project, filter: sources, now: now)) {
+        XCTAssertThrowsError(try store.unloggedTime(in: .instants(day), groupBy: .project, filter: sources, now: now)) {
             XCTAssertTrue("\($0)".contains("sources"), "\($0)")
         }
     }
 
     func testUnloggedTimeAndSummariesRejectAppAndSourceGroupings() throws {
         for groupBy in [Store.GroupBy.app, .source] {
-            XCTAssertThrowsError(try store.unloggedTime(in: day, groupBy: groupBy, now: now)) {
+            XCTAssertThrowsError(try store.unloggedTime(in: .instants(day), groupBy: groupBy, now: now)) {
                 XCTAssertTrue("\($0)".contains(groupBy.rawValue), "\($0)")
             }
-            XCTAssertThrowsError(try store.summary(in: day, groupBy: groupBy, now: now)) {
+            XCTAssertThrowsError(try store.summary(in: .instants(day), groupBy: groupBy, now: now)) {
                 XCTAssertTrue("\($0)".contains(groupBy.rawValue), "\($0)")
             }
         }
@@ -115,7 +115,7 @@ final class FilterTests: XCTestCase {
         try entry(60, minutes: 10, waid, title: "Admin", tags: ["review"])
         var f = Store.EntryFilter()
         f.text = "review"
-        let summary = try store.summary(in: day, groupBy: .project, filter: f, now: now)
+        let summary = try store.summary(in: .instants(day), groupBy: .project, filter: f, now: now)
         XCTAssertEqual(summary.groups.map(\.key), ["Acme / Phase 2", "Beta / Rollout"])
         XCTAssertEqual(summary.seconds, 50 * 60)
     }
@@ -128,15 +128,15 @@ final class FilterTests: XCTestCase {
 
         var project = Store.EntryFilter()
         project.projectID = acme.id
-        XCTAssertEqual(try store.summary(in: day, groupBy: .category, filter: project, now: now).groups.map(\.key),
+        XCTAssertEqual(try store.summary(in: .instants(day), groupBy: .category, filter: project, now: now).groups.map(\.key),
                        ["Implementation", "Meetings"])
         var client = Store.EntryFilter()
         client.clientID = beta.clientID
-        XCTAssertEqual(try store.summary(in: day, groupBy: .project, filter: client, now: now).groups.map(\.key),
+        XCTAssertEqual(try store.summary(in: .instants(day), groupBy: .project, filter: client, now: now).groups.map(\.key),
                        ["Beta / Rollout"])
         var category = Store.EntryFilter()
         category.categoryID = implementation.id
-        let byCategory = try store.summary(in: day, groupBy: .project, filter: category, now: now)
+        let byCategory = try store.summary(in: .instants(day), groupBy: .project, filter: category, now: now)
         XCTAssertEqual(byCategory.groups.map(\.key), ["waid", "Acme / Phase 2", "Beta / Rollout"])
         XCTAssertEqual(byCategory.seconds, 80 * 60)
     }
@@ -150,13 +150,13 @@ final class FilterTests: XCTestCase {
         func keys(_ configure: (inout Store.ActivityFilter) -> Void) throws -> [String] {
             var f = Store.ActivityFilter()
             configure(&f)
-            return try store.evidence(in: day, groupBy: .project, filter: f, now: now).map(\.key)
+            return try store.evidence(in: .instants(day), groupBy: .project, filter: f, now: now).map(\.key)
         }
         XCTAssertEqual(try keys { $0.projectID = beta.id }, ["Beta / Rollout"])
         XCTAssertEqual(try keys { $0.clientID = acme.clientID }, ["Acme / Phase 2"])
         XCTAssertEqual(try keys { $0.categoryID = meetings.id }, ["Acme / Phase 2"])
         XCTAssertEqual(try keys { $0.text = "search" }, ["Beta / Rollout"])
-        XCTAssertEqual(try keys { $0.sources = [Source.agent("claude-code")] }, [Store.noProject])
+        XCTAssertEqual(try keys { $0.sources = [Source.agent("claude-code")] }, [TimeAccounting.noProject])
     }
 
     // MARK: Timesheet
@@ -165,14 +165,14 @@ final class FilterTests: XCTestCase {
         try entry(0, minutes: 30, acme, title: "confirmed work")
         try entry(30, minutes: 60, acme, title: "drafted work", status: .draft)
 
-        XCTAssertEqual(try store.timesheet(in: day, now: now).map(\.notes), [["confirmed work"]],
+        XCTAssertEqual(try store.timesheet(in: .instants(day), now: now).map(\.notes), [["confirmed work"]],
                        "confirmed only by default")
-        XCTAssertEqual(try store.timesheet(in: day, includeDrafts: true, now: now).map(\.hours), [1.5])
+        XCTAssertEqual(try store.timesheet(in: .instants(day), includeDrafts: true, now: now).map(\.hours), [1.5])
         var drafts = Store.EntryFilter()
         drafts.status = .draft
-        XCTAssertEqual(try store.timesheet(in: day, filter: drafts, now: now).map(\.notes), [["drafted work"]])
+        XCTAssertEqual(try store.timesheet(in: .instants(day), filter: drafts, now: now).map(\.notes), [["drafted work"]])
         var confirmed = Store.EntryFilter()
         confirmed.status = .confirmed
-        XCTAssertEqual(try store.timesheet(in: day, filter: confirmed, includeDrafts: true, now: now).map(\.hours), [0.5])
+        XCTAssertEqual(try store.timesheet(in: .instants(day), filter: confirmed, includeDrafts: true, now: now).map(\.hours), [0.5])
     }
 }

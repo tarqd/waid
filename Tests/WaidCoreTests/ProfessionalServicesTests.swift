@@ -81,10 +81,10 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertNil(spans[1].project)
         XCTAssertEqual(spans[1].client, "Acme", "matched by domain without a project")
 
-        let byClient = try store.evidence(in: day, groupBy: .client, now: now)
+        let byClient = try store.evidence(in: .instants(day), groupBy: .client, now: now)
         XCTAssertEqual(byClient.map(\.key), ["Acme"])
-        let byCategory = try store.evidence(in: day, groupBy: .category, now: now)
-        XCTAssertEqual(Set(byCategory.map(\.key)), ["Meetings", Store.noCategory])
+        let byCategory = try store.evidence(in: .instants(day), groupBy: .category, now: now)
+        XCTAssertEqual(Set(byCategory.map(\.key)), ["Meetings", TimeAccounting.noCategory])
     }
 
     func testSuggestionsSplitByCategory() throws {
@@ -105,7 +105,7 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertEqual(drafts.map(\.billable), [true, true])
         XCTAssertEqual(drafts.first?.client, "Acme")
 
-        let unlogged = try store.unloggedTime(in: day, groupBy: .category, now: now)
+        let unlogged = try store.unloggedTime(in: .instants(day), groupBy: .category, now: now)
         XCTAssertEqual(unlogged.groups.map(\.key), ["Implementation", "Meetings"])
         XCTAssertEqual(unlogged.seconds, 90 * 60, "matches the suggested drafts")
     }
@@ -126,12 +126,12 @@ final class ProfessionalServicesTests: XCTestCase {
         try store.insertActivity(start: t0 + 5400, end: t0 + 7200, source: Source.window,
                                  sample: ActivitySample(appName: "Xcode", title: "waid"))
 
-        let byCategory = try store.unloggedTime(in: day, groupBy: .category, now: now)
+        let byCategory = try store.unloggedTime(in: .instants(day), groupBy: .category, now: now)
         XCTAssertEqual(byCategory.groups, [
             Store.TimeGroup(key: "Implementation", seconds: 90 * 60, billableSeconds: 60 * 60),
             Store.TimeGroup(key: "Presales", seconds: 30 * 60, billableSeconds: 0),
         ])
-        let byProject = try store.unloggedTime(in: day, groupBy: .project, now: now)
+        let byProject = try store.unloggedTime(in: .instants(day), groupBy: .project, now: now)
         XCTAssertEqual(byProject.groups, [
             Store.TimeGroup(key: "Acme / Phase 2", seconds: 90 * 60, billableSeconds: 60 * 60),
             Store.TimeGroup(key: "waid", seconds: 30 * 60, billableSeconds: 0),
@@ -164,20 +164,20 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertEqual(budgets[0].remainingHours ?? 0, 7, accuracy: 0.001)
         XCTAssertEqual(budgets[0].burn ?? 0, 0.3, accuracy: 0.001)
 
-        let summary = try store.summary(in: day, groupBy: .category, now: now)
+        let summary = try store.summary(in: .instants(day), groupBy: .category, now: now)
         XCTAssertEqual(summary.groups.map(\.key), ["Implementation", "Presales"])
         XCTAssertEqual(summary.groups.map(\.billableSeconds), [3.0 * 3600, 0])
         XCTAssertEqual(summary.seconds, 4 * 3600, "drafts excluded by default")
         XCTAssertEqual(summary.billableSeconds, 3 * 3600)
         XCTAssertEqual(summary.utilization, 0.75)
 
-        let withDrafts = try store.summary(in: day, groupBy: .category, includeDrafts: true, now: now)
+        let withDrafts = try store.summary(in: .instants(day), groupBy: .category, includeDrafts: true, now: now)
         XCTAssertEqual(withDrafts.seconds, 5.5 * 3600)
         XCTAssertEqual(withDrafts.utilization ?? 0, 4.5 / 5.5, accuracy: 0.0001)
-        XCTAssertNil(try store.summary(in: DateInterval(start: t0 - 86400, duration: 3600), groupBy: .project, now: now).utilization,
+        XCTAssertNil(try store.summary(in: .instants(DateInterval(start: t0 - 86400, duration: 3600)), groupBy: .project, now: now).utilization,
                      "no time, no utilization")
 
-        let rows = try store.timesheet(in: day, now: now)
+        let rows = try store.timesheet(in: .instants(day), now: now)
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows[0].hours, 3, accuracy: 0.001)
         XCTAssertEqual(rows[0].notes, ["SSO config", "data migration, \"phase 1\""])
@@ -189,7 +189,7 @@ final class ProfessionalServicesTests: XCTestCase {
 
         var onlyBeta = Store.EntryFilter()
         onlyBeta.clientID = try store.client(named: "Beta")?.id
-        XCTAssertEqual(try store.timesheet(in: day, filter: onlyBeta, now: now).map(\.project), ["Beta / Opportunity"])
+        XCTAssertEqual(try store.timesheet(in: .instants(day), filter: onlyBeta, now: now).map(\.project), ["Beta / Opportunity"])
     }
 
     func testMigrationTurnsProjectTreeIntoClients() throws {

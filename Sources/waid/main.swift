@@ -148,29 +148,31 @@ case "report":
     guard let groupBy = Store.GroupBy(rawValue: byName) else { fail("unknown --by \"\(byName)\"\n\n\(usage)") }
     let name = args.first { !$0.hasPrefix("--") } ?? "today"
     guard let range = namedRange(name, store: store) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
+    if args.contains("--unlogged") && args.contains("--evidence") {
+        fail("--unlogged and --evidence are different reports; pass one\n\n\(usage)")
+    }
     func pad(_ s: String, _ n: Int) -> String { s.padding(toLength: n, withPad: " ", startingAt: 0) }
+    /// A Summary or Unlogged time as a table: one row per group, then the total.
+    func printTotals(_ totals: Store.TimeTotals, column: String, totalSuffix: String = "") {
+        let width = max(12, totals.groups.map(\.key.count).max() ?? 0)
+        print(pad(byName, width) + "  " + pad(column, 10) + "billable")
+        for group in totals.groups {
+            print(pad(group.key, width) + "  " + pad(formatMinutes(group.seconds), 10) + formatMinutes(group.billableSeconds))
+        }
+        print(pad("total", width) + "  " + pad(formatMinutes(totals.seconds), 10) + formatMinutes(totals.billableSeconds) + totalSuffix)
+    }
     do {
         if args.contains("--unlogged") {
             let unlogged = try store.unloggedTime(in: range, groupBy: groupBy)
             guard !unlogged.groups.isEmpty else { print("nothing unlogged \(name)"); break }
-            let width = max(12, unlogged.groups.map(\.key.count).max() ?? 0)
-            print(pad(byName, width) + "  unlogged  billable")
-            for group in unlogged.groups {
-                print(pad(group.key, width) + "  " + pad(formatMinutes(group.seconds), 10) + formatMinutes(group.billableSeconds))
-            }
-            print(pad("total", width) + "  " + pad(formatMinutes(unlogged.seconds), 10) + formatMinutes(unlogged.billableSeconds))
+            printTotals(unlogged, column: "unlogged")
             break
         }
         guard args.contains("--evidence") else {
             let summary = try store.summary(in: range, groupBy: groupBy)
             guard !summary.groups.isEmpty else { print("nothing logged \(name)"); break }
-            let width = max(12, summary.groups.map(\.key.count).max() ?? 0)
-            print(pad(byName, width) + "  time      billable")
-            for group in summary.groups {
-                print(pad(group.key, width) + "  " + pad(formatMinutes(group.seconds), 10) + formatMinutes(group.billableSeconds))
-            }
-            print(pad("total", width) + "  " + pad(formatMinutes(summary.seconds), 10) + formatMinutes(summary.billableSeconds)
-                  + (summary.utilization.map { "  (\(Int(($0 * 100).rounded()))% utilization)" } ?? ""))
+            printTotals(summary, column: "time",
+                        totalSuffix: summary.utilization.map { "  (\(Int(($0 * 100).rounded()))% utilization)" } ?? "")
             break
         }
         let rows = try store.evidence(in: range, groupBy: groupBy)
