@@ -206,7 +206,7 @@ final class MCPServerTests: XCTestCase {
                                                origin: .manual), now: now)
         }
 
-        let summary = try call("summarize", ["range": "today", "kind": "entries", "group_by": "category"])
+        let summary = try call("summarize", ["range": "today", "group_by": "category"])
         XCTAssertEqual(summary["groups"], [["key": "Implementation", "minutes": .number(20.3), "billable_minutes": .number(20.3)],
                                            ["key": "Meetings", "minutes": .number(20.3), "billable_minutes": .number(20.3)],
                                            ["key": "Presales", "minutes": .number(20.3), "billable_minutes": 0]])
