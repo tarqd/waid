@@ -17,6 +17,14 @@ public enum StoreError: Error, CustomStringConvertible, Equatable {
 /// All persistent state lives in one local SQLite file. There is no server.
 public final class Store {
     public let db: Database
+    /// The zone of the writing process: what rows with no zone of their own
+    /// are stamped with (ADR-0002). The system zone at the time of writing,
+    /// unless set.
+    public var processZone: TimeZone {
+        get { fixedZone ?? .current }
+        set { fixedZone = newValue }
+    }
+    private var fixedZone: TimeZone?
 
     /// The schema version a database created by `schema` carries. Earlier
     /// versions came from the migration history before observations, which
@@ -232,14 +240,15 @@ public final class Store {
 
     // MARK: Activities
 
-    /// Inserts a focus observation stamped with `zone` and the local date of
+    /// Inserts a focus observation stamped with `zone` (else `processZone`) and the local date of
     /// its start there. With no `end` it is open, its end the heartbeat at
     /// `start`, until `close(activityID:end:)`; with an `end` it is closed.
     @discardableResult
     public func insertActivity(
         start: Date, end: Date?, source: String, sample: ActivitySample = ActivitySample(),
-        projectID: Int64? = nil, note: String? = nil, zone: TimeZone = .current
+        projectID: Int64? = nil, note: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
+        let zone = zone ?? processZone
         try db.run(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, open, zone, local_date,
@@ -274,8 +283,9 @@ public final class Store {
     @discardableResult
     public func upsertExternal(
         source: String, externalID: String, start: Date, end: Date,
-        title: String?, path: String?, meta: String? = nil, zone: TimeZone = .current
+        title: String?, path: String?, meta: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
+        let zone = zone ?? processZone
         let row = try db.query(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, zone, local_date, external_id, title, path, meta)

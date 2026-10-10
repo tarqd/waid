@@ -89,8 +89,8 @@ extension Store {
     func insertEntry(_ new: NewTimeEntry, now: Date) throws -> TimeEntry {
         try validate(start: new.start, end: new.end, excluding: nil, now: now)
         let billable = try new.billable ?? catalog().defaultBillable(projectID: new.projectID, categoryID: new.categoryID)
-        // The process zone for now; the fallback chain of ADR-0002 comes later.
-        let zone = TimeZone.current
+        // The process zone for now; the rest of ADR-0002's fallback chain comes later.
+        let zone = processZone
         let dates = Self.localDates(start: new.start, end: new.end, in: zone)
         try db.run(
             """
@@ -120,7 +120,7 @@ extension Store {
             if let billable = changes.billable { entry.billable = billable }
             if let status = changes.status { entry.status = status }
             try validate(start: entry.start, end: entry.end, excluding: id, now: now)
-            let dates = Self.localDates(start: entry.start, end: entry.end, in: Self.zone(entry))
+            let dates = Self.localDates(start: entry.start, end: entry.end, in: zone(of: entry))
             try db.run(
                 """
                 UPDATE time_entries SET start_ts = ?, end_ts = ?, start_date = ?, end_date = ?, project_id = ?,
@@ -180,14 +180,14 @@ extension Store {
     /// Ends a running entry at `now`, or at its start if that is later.
     private func stop(_ running: TimeEntry, now: Date) throws -> TimeEntry {
         let end = max(now, running.start)
-        let endDate = Self.localDates(start: running.start, end: end, in: Self.zone(running)).end
+        let endDate = Self.localDates(start: running.start, end: end, in: zone(of: running)).end
         try db.run("UPDATE time_entries SET end_ts = ?, end_date = ?, updated_ts = ? WHERE id = ?",
                    [end, endDate, now, running.id])
         return try requireTimeEntry(id: running.id)
     }
 
-    private static func zone(_ entry: TimeEntry) -> TimeZone {
-        TimeZone(identifier: entry.zone) ?? .current
+    private func zone(of entry: TimeEntry) -> TimeZone {
+        TimeZone(identifier: entry.zone) ?? processZone
     }
 
     /// The local dates of a span's first and last instants in `zone`. A span

@@ -59,4 +59,59 @@ final class ObservationTests: XCTestCase {
         XCTAssertNotEqual(other, id)
         XCTAssertEqual(try store.activities(in: DateInterval(start: t0, duration: 3600)).count, 2)
     }
+
+    func testADatabaseFromBeforeObservationsIsRefusedNotMigrated() throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try Database(path: path).execute("PRAGMA user_version = 4")
+        XCTAssertThrowsError(try Store(path: path)) { XCTAssertTrue("\($0)".contains("move it aside"), "\($0)") }
+
+        let fresh = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite").path
+        defer { try? FileManager.default.removeItem(atPath: fresh) }
+        try Store(path: fresh).insertActivity(start: t0, end: t0 + 60, source: Source.window, sample: editor)
+        XCTAssertEqual(try Store(path: fresh).activities(in: DateInterval(start: t0, duration: 60)).count, 1, "reopens")
+    }
+
+    func testANewDatabaseHoldsTheDefaultIdleThreshold() throws {
+        XCTAssertEqual(try store.value(forKey: "idle_threshold_seconds"), "180")
+    }
+
+    func testObservationsCarryTheirZoneAndLocalDate() throws {
+        // 21:00 UTC on the 9th is 06:00 on the 10th in Tokyo.
+        let late = TimeRange.parseDate("2026-10-09T21:00:00Z")!
+        let window = try store.insertActivity(start: late, end: late + 600, source: Source.window, sample: editor, zone: tokyo)
+        let agent = try store.upsertExternal(source: Source.agent("claude-code"), externalID: "s#0", start: late,
+                                             end: late + 600, title: "fix tests", path: nil, zone: tokyo)
+        for id in [window, agent] {
+            let activity = try XCTUnwrap(try store.activity(id: id))
+            XCTAssertEqual(activity.zone, "Asia/Tokyo")
+            XCTAssertEqual(activity.localDate, "2026-10-10")
+        }
+    }
+
+    func testTimeEntriesCarryTheProcessZoneAndTheirLocalDates() throws {
+        store.processZone = tokyo
+
+        // 23:00 to 01:00 in Tokyo: one entry, two local dates.
+        let late = TimeRange.parseDate("2026-10-09T23:00:00+09:00")!
+        let crossing = try store.createEntry(NewTimeEntry(start: late, end: late + 7200, origin: .manual), now: late + 7200)
+        XCTAssertEqual(crossing.zone, "Asia/Tokyo")
+        XCTAssertEqual(crossing.startDate, "2026-10-09")
+        XCTAssertEqual(crossing.endDate, "2026-10-10")
+
+        // Ending at midnight leaves no time on the next date.
+        let evening = try store.createEntry(NewTimeEntry(start: late - 3600, end: late, origin: .away), now: late + 7200)
+        XCTAssertEqual(evening.endDate, "2026-10-09")
+        XCTAssertEqual(evening.origin, .away)
+
+        let timer = try store.startTimer(projectID: nil, now: late + 3 * 3600).started
+        XCTAssertEqual(timer.startDate, "2026-10-10")
+        XCTAssertNil(timer.endDate, "no last date while running")
+        let stopped = try XCTUnwrap(try store.stopTimer(now: late + 4 * 3600))
+        XCTAssertEqual(stopped.endDate, "2026-10-10")
+
+        var move = TimeEntryChanges()
+        move.end = .some(late + 26 * 3600)
+        XCTAssertEqual(try store.updateEntry(id: stopped.id, move, now: late + 27 * 3600).endDate, "2026-10-11")
+    }
 }

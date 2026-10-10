@@ -25,9 +25,10 @@ public final class ActivityRecorder {
         self.idleThreshold = idleThreshold
     }
 
-    /// Records one sample, stamping new observations with `zone`. Pass nil
-    /// when nothing should be tracked (screen locked, system going to sleep).
-    public func record(_ sample: ActivitySample?, at now: Date, zone: TimeZone = .current) throws {
+    /// Records one sample, stamping new observations with `zone` (else the
+    /// store's process zone). Pass a nil sample when nothing should be
+    /// tracked (screen locked, system going to sleep).
+    public func record(_ sample: ActivitySample?, at now: Date, zone: TimeZone? = nil) throws {
         if !started {
             // Whatever a previous run left open ended at its last heartbeat.
             try store.closeOpenObservations()
