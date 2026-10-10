@@ -339,23 +339,26 @@ public final class Store {
             assignedCategoryID: row.int("category_id"), note: row.string("note"), meta: row.string("meta"), hidden: row.int("hidden") == 1)
     }
 
-    // MARK: Summaries
+    // MARK: Evidence
 
     public enum GroupBy: String, CaseIterable, Sendable {
         case project, client, category, app, source, day
     }
 
-    public struct SummaryRow: Codable, Equatable, Sendable {
+    /// Evidence under one key: observed activity time per source.
+    public struct EvidenceRow: Codable, Equatable, Sendable {
         public var key: String
         /// Seconds per source. Sources are reported separately because they
         /// overlap in wall-clock time and must not be summed blindly.
         public var secondsBySource: [String: Double]
     }
 
-    public func summary(
+    /// Evidence: activity totals per source, to help write time entries.
+    /// Observed time, never claimed time, so never summed across sources.
+    public func evidence(
         in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [SummaryRow] {
+    ) throws -> [EvidenceRow] {
         var totals: [String: [String: Double]] = [:]
         for activity in try activities(in: range, filter: filter, now: now) {
             let clipped = TimeAccounting.clip(start: activity.start, end: activity.end, to: range, now: now)
@@ -367,7 +370,7 @@ public final class Store {
             }
         }
         return TimeAccounting.sorted(
-            totals.map { SummaryRow(key: $0.key, secondsBySource: $0.value) }, groupBy: groupBy,
+            totals.map { EvidenceRow(key: $0.key, secondsBySource: $0.value) }, groupBy: groupBy,
             key: \.key, seconds: { $0.secondsBySource.values.reduce(0, +) })
     }
 }
