@@ -21,6 +21,14 @@ _Avoid_: log, record, ledger
 **Running**:
 A span with no end yet. It counts up to now, and counts nothing if it starts after now.
 
+**Open**:
+An observation still being recorded. Its end is its last heartbeat, never missing, so it counts only up to that heartbeat, not up to now. Running applies to timers, not observations. At most one observation per stream and source is open; once closed, its time is fixed.
+_Avoid_: running (for observations)
+
+**Heartbeat**:
+The latest instant the daemon saw an open observation still holding, stored as its end. A restarted daemon closes whatever was left open at its last heartbeat.
+_Avoid_: sample (the reading that moves it)
+
 **Present**:
 The stretches when input was seen, bridged across gaps no longer than the idle threshold. The threshold is a setting, and changing it re-reads history.
 _Avoid_: active (for the derived result), not idle
