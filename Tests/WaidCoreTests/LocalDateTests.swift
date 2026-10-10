@@ -56,8 +56,7 @@ final class LocalDateTests: XCTestCase {
         // Landed and noticed at Saturday 01:00 in Tokyo, which is Friday 12:00 in New York.
         try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-10T01:00:00+09:00")!)
         let project = try store.ensureProject("Travel")
-        try store.insertActivity(start: start, end: end, source: Source.window,
-                                 sample: ActivitySample(appName: "Mail"), projectID: project.id)
+        try store.work(ActivitySample(appName: "Mail"), from: start, to: end, projectID: project.id)
 
         // Tokyo: Fri 22-24 (2 h) + Sat 00-01 (1 h); New York: Fri 12-24 (12 h) + Sat 00-02 (2 h).
         let evidence = try store.evidence(in: .instants(week), groupBy: .day, calendar: utc, now: now)

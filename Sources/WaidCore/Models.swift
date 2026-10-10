@@ -89,8 +89,21 @@ public struct Activity: Codable, Equatable, Sendable {
     public var clientID: Int64?
     public var client: String?
 
+    /// The parts of its extent (`start` to `end`) that count, by the
+    /// attribution rule: for a window activity, the time you were present and
+    /// not locked; for an agent session, all of it. Disjoint, in order.
+    /// Filled in by queries.
+    public var counted: [DateInterval] = []
+
+    /// The time it counts: the sum of `counted`. An open activity counts up
+    /// to its last heartbeat, so `now` changes nothing.
     public func duration(now: Date = Date()) -> TimeInterval {
-        TimeAccounting.end(start: start, end: end, now: now).timeIntervalSince(start)
+        counted.reduce(0) { $0 + $1.duration }
+    }
+
+    /// The time it counts within `range`.
+    public func duration(in range: DateInterval) -> TimeInterval {
+        TimeAccounting.clip(counted, to: [range]).reduce(0) { $0 + $1.duration }
     }
 }
 

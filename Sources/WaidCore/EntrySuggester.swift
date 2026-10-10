@@ -54,21 +54,24 @@ public struct EntrySuggester: Sendable {
         // Per bucket: seconds by project (-1 = none), and by category within each project.
         var byProject = Array(repeating: [Int64: Double](), count: count)
         var byCategory = Array(repeating: [Int64: [Int64: Double]](), count: count)
+        // Each counted interval of each activity, not its extent: a pause
+        // inside a window activity leaves its buckets idle.
         for activity in activities where eligible(activity) {
-            let start = max(activity.start, range.start), end = min(activity.end ?? range.end, range.end)
-            guard end > start else { continue }
-            let project = activity.projectID ?? -1
-            var index = Int(start.timeIntervalSince(range.start) / bucket)
-            while index < count {
-                let bucketStart = range.start.addingTimeInterval(Double(index) * bucket)
-                let bucketEnd = min(bucketStart.addingTimeInterval(bucket), range.end)
-                guard bucketStart < end else { break }
-                let overlap = min(end, bucketEnd).timeIntervalSince(max(start, bucketStart))
-                byProject[index][project, default: 0] += overlap
-                if let category = activity.categoryID {
-                    byCategory[index][project, default: [:]][category, default: 0] += overlap
+            for counted in TimeAccounting.clip(activity.counted, to: [range]) {
+                let (start, end) = (counted.start, counted.end)
+                let project = activity.projectID ?? -1
+                var index = Int(start.timeIntervalSince(range.start) / bucket)
+                while index < count {
+                    let bucketStart = range.start.addingTimeInterval(Double(index) * bucket)
+                    let bucketEnd = min(bucketStart.addingTimeInterval(bucket), range.end)
+                    guard bucketStart < end else { break }
+                    let overlap = min(end, bucketEnd).timeIntervalSince(max(start, bucketStart))
+                    byProject[index][project, default: 0] += overlap
+                    if let category = activity.categoryID {
+                        byCategory[index][project, default: [:]][category, default: 0] += overlap
+                    }
+                    index += 1
                 }
-                index += 1
             }
         }
         return (0..<count).map { i in
@@ -147,7 +150,7 @@ public struct EntrySuggester: Sendable {
     private func contributors(to block: Block, from activities: [Activity]) -> [Contributor] {
         var totals: [String: Double] = [:]
         for activity in activities where eligible(activity) && activity.projectID == block.label.projectID {
-            let overlap = min(activity.end ?? block.end, block.end).timeIntervalSince(max(activity.start, block.start))
+            let overlap = activity.duration(in: DateInterval(start: block.start, end: block.end))
             guard overlap > 0 else { continue }
             totals[activity.title ?? activity.appName ?? activity.source, default: 0] += overlap
         }
@@ -165,17 +168,7 @@ public struct EntrySuggester: Sendable {
     }
 
     static func subtract(_ occupied: [DateInterval], from interval: DateInterval) -> [DateInterval] {
-        var pieces = [interval]
-        for hole in occupied {
-            pieces = pieces.flatMap { piece -> [DateInterval] in
-                guard hole.start < piece.end, hole.end > piece.start else { return [piece] }
-                var out: [DateInterval] = []
-                if hole.start > piece.start { out.append(DateInterval(start: piece.start, end: hole.start)) }
-                if hole.end < piece.end { out.append(DateInterval(start: hole.end, end: piece.end)) }
-                return out
-            }
-        }
-        return pieces
+        TimeAccounting.subtract(occupied, from: [interval])
     }
 }
 

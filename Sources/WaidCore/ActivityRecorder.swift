@@ -5,9 +5,9 @@ import Foundation
 ///
 /// - focus: consecutive samples with the same app/title/url/path extend the
 ///   open observation. A change or a gap longer than `maxGap` (a missed
-///   heartbeat, a daemon restart) closes it. The user going idle for
-///   `idleThreshold` still closes it trimmed back to the last input, until
-///   reports derive presence from the active stream instead.
+///   heartbeat, a daemon restart) closes it. Nothing is trimmed: whether you
+///   were present is derived from the active stream when you ask
+///   (GLOSSARY.md: Present).
 /// - active: extends while input was seen within the last `interval`, and
 ///   closes at the last input instant once it wasn't.
 /// - locked: lock or sleep closes focus and active and opens a locked
@@ -47,16 +47,14 @@ public final class ActivityRecorder {
     public let interval: TimeInterval
     /// The heartbeat window: three intervals without a sample end an observation.
     public var maxGap: TimeInterval { interval * 3 }
-    public let idleThreshold: TimeInterval
     private var focus: Open?
     private var active: Open?
     private var locked: Open?
     private var closedLeftovers = false
 
-    public init(store: Store, interval: TimeInterval = 5, idleThreshold: TimeInterval = 180) {
+    public init(store: Store, interval: TimeInterval = 5) {
         self.store = store
         self.interval = interval
-        self.idleThreshold = idleThreshold
     }
 
     /// Records one signal at `now`, stamping observations with `zone` (else
@@ -101,15 +99,6 @@ public final class ActivityRecorder {
     }
 
     private func recordFocus(_ sample: ActivitySample, at now: Date, zone: TimeZone) throws {
-        guard sample.idleSeconds < idleThreshold else {
-            if var open = focus {
-                // Trim the idle tail: input stopped `idleSeconds` ago, but we
-                // kept extending the observation until the threshold tripped.
-                try close(&open, at: min(open.end, now.addingTimeInterval(-sample.idleSeconds)), zone: zone)
-            }
-            focus = nil
-            return
-        }
         if var open = focus, open.sample.map(Key.init) == Key(sample), withinGap(open, now) {
             try extend(&open, to: now, zone: zone)
             focus = open

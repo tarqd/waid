@@ -64,8 +64,7 @@ final class SuggesterTests: XCTestCase {
     }
 
     private func window(_ app: String, _ title: String, from: Double, minutes: Double) throws {
-        try store.insertActivity(start: t0 + from * 60, end: t0 + (from + minutes) * 60, source: Source.window,
-                                 sample: ActivitySample(appName: app, title: title))
+        try store.work(ActivitySample(appName: app, title: title), from: t0 + from * 60, to: t0 + (from + minutes) * 60)
     }
 
     func testMergesAcrossInterruptionsAndDropsShortBlocks() throws {
