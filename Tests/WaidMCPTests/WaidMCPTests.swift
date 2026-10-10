@@ -123,9 +123,11 @@ final class MCPServerTests: XCTestCase {
 
         let unlogged = try call("evidence", ["range": "today", "kind": "unlogged"])
         XCTAssertEqual(unlogged["kind"], "unlogged")
-        XCTAssertEqual(unlogged["groups"], [["key": "waid", "minutes": 60]])
+        XCTAssertEqual(unlogged["groups"], [["key": "waid", "minutes": 60, "billable_minutes": 0]])
         XCTAssertEqual(unlogged["total_minutes"], 60)
+        XCTAssertEqual(unlogged["billable_minutes"], 0, "waid is internal")
         XCTAssertEqual(try call("get_status")["unlogged_today_minutes"], 60)
+        XCTAssertEqual(try call("get_status")["unlogged_today_billable_minutes"], 0)
 
         let suggested = try call("suggest_time_entries", ["range": "today"])
         guard case .array(let drafts) = suggested, drafts.count == 1, let draft = drafts.first?["entry"] else {
@@ -193,6 +195,25 @@ final class MCPServerTests: XCTestCase {
 
         let csv = try call("timesheet", ["range": "today", "client": "Beta", "format": "csv"])
         XCTAssertEqual(csv, "date,client,project,category,hours,billable_hours,notes\n2026-10-09,Beta,Rollout,Presales,1.00,0.00,demo\n")
+    }
+
+    func testUnloggedTimeShowsBillableMinutes() throws {
+        let t = now.addingTimeInterval(-3 * 3600)
+        _ = try call("create_project", ["name": "Phase 2", "client": "Acme"])
+        _ = try call("create_rule", ["project": "Acme / Phase 2", "field": "title", "op": "contains", "pattern": "acme"])
+        _ = try call("create_rule", ["category": "Presales", "field": "app_name", "op": "equals", "pattern": "Keynote"])
+        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode", title: "acme-integration"))
+        try store.insertActivity(start: t + 3600, end: t + 5400, source: Source.window,
+                                 sample: ActivitySample(appName: "Keynote", title: "Acme pitch"))
+
+        let unlogged = try call("evidence", ["range": "today", "kind": "unlogged"])
+        XCTAssertEqual(unlogged["groups"], [["key": "Acme / Phase 2", "minutes": 90, "billable_minutes": 60]])
+        XCTAssertEqual(unlogged["total_minutes"], 90)
+        XCTAssertEqual(unlogged["billable_minutes"], 60, "presales is never billable")
+        let status = try call("get_status")
+        XCTAssertEqual(status["unlogged_today_minutes"], 90)
+        XCTAssertEqual(status["unlogged_today_billable_minutes"], 60)
     }
 
     func testFiguresAreRoundedOnceAndTotalsComeFromSeconds() throws {

@@ -110,6 +110,36 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertEqual(unlogged.seconds, 90 * 60, "matches the suggested drafts")
     }
 
+    func testUnloggedTimeIsBillableOnlyForBillableProjectsAndCategories() throws {
+        let acme = try store.ensureProject("Acme / Phase 2")
+        let internalProject = try store.ensureProject("waid")
+        let presales = try store.requireCategory(named: "Presales")
+        let implementation = try store.requireCategory(named: "Implementation")
+        try store.addRule(projectID: acme.id, field: .title, op: .contains, pattern: "acme")
+        try store.addRule(projectID: internalProject.id, field: .title, op: .contains, pattern: "waid")
+        try store.addRule(categoryID: presales.id, field: .appName, op: .equals, pattern: "Keynote")
+        try store.addRule(categoryID: implementation.id, field: .appName, op: .equals, pattern: "Xcode")
+        try store.insertActivity(start: t0, end: t0 + 3600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode", title: "acme-integration"))
+        try store.insertActivity(start: t0 + 3600, end: t0 + 5400, source: Source.window,
+                                 sample: ActivitySample(appName: "Keynote", title: "Acme pitch"))
+        try store.insertActivity(start: t0 + 5400, end: t0 + 7200, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode", title: "waid"))
+
+        let byCategory = try store.unloggedTime(in: day, groupBy: .category, now: now)
+        XCTAssertEqual(byCategory.groups, [
+            Store.TimeGroup(key: "Implementation", seconds: 90 * 60, billableSeconds: 60 * 60),
+            Store.TimeGroup(key: "Presales", seconds: 30 * 60, billableSeconds: 0),
+        ])
+        let byProject = try store.unloggedTime(in: day, groupBy: .project, now: now)
+        XCTAssertEqual(byProject.groups, [
+            Store.TimeGroup(key: "Acme / Phase 2", seconds: 90 * 60, billableSeconds: 60 * 60),
+            Store.TimeGroup(key: "waid", seconds: 30 * 60, billableSeconds: 0),
+        ])
+        XCTAssertEqual(byProject.seconds, 2 * 3600)
+        XCTAssertEqual(byProject.billableSeconds, 3600)
+    }
+
     func testBudgetsAndTimesheet() throws {
         let acme = try store.createProject(name: "Phase 2", clientID: try store.ensureClient(named: "Acme").id, budgetHours: 10)
         let prospect = try store.createProject(name: "Opportunity", clientID: try store.ensureClient(named: "Beta").id,
