@@ -349,52 +349,22 @@ public final class Store {
     ) throws -> [SummaryRow] {
         var totals: [String: [String: Double]] = [:]
         for activity in try activities(in: range, filter: filter, now: now) {
-            let clipped = DateInterval(
-                start: max(activity.start, range.start),
-                end: max(max(activity.start, range.start), min(activity.end ?? now, range.end)))
-            // Day grouping splits spans that cross midnight.
-            var pieces: [(String, TimeInterval)] = []
-            switch groupBy {
-            case .project: pieces = [(activity.project ?? Self.noProject, clipped.duration)]
-            case .client: pieces = [(activity.client ?? Self.noClient, clipped.duration)]
-            case .category: pieces = [(activity.category ?? Self.noCategory, clipped.duration)]
-            case .app: pieces = [(activity.appName ?? activity.source, clipped.duration)]
-            case .source: pieces = [(activity.source, clipped.duration)]
-            case .day: pieces = Self.splitByDay(clipped, calendar: calendar)
-            }
-            for (key, seconds) in pieces where seconds > 0 {
+            let clipped = TimeAccounting.clip(start: activity.start, end: activity.end, to: range, now: now)
+            let labels = TimeAccounting.Labels(project: activity.project, client: activity.client,
+                                               category: activity.category, app: activity.appName, source: activity.source)
+            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, calendar: calendar)
+            where seconds > 0 {
                 totals[key, default: [:]][activity.source, default: 0] += seconds
             }
         }
-        return totals
-            .map { SummaryRow(key: $0.key, secondsBySource: $0.value) }
-            .sorted {
-                groupBy == .day ? $0.key < $1.key
-                    : $0.secondsBySource.values.reduce(0, +) > $1.secondsBySource.values.reduce(0, +)
-            }
+        return TimeAccounting.sorted(
+            totals.map { SummaryRow(key: $0.key, secondsBySource: $0.value) }, groupBy: groupBy,
+            key: \.key, seconds: { $0.secondsBySource.values.reduce(0, +) })
     }
 }
 
 extension Store {
-    static let noProject = "(no project)"
-    static let noClient = "(no client)"
-    static let noCategory = "(no category)"
-
-    /// Splits an interval at local midnights, keyed "yyyy-MM-dd".
-    static func splitByDay(_ interval: DateInterval, calendar: Calendar) -> [(String, TimeInterval)] {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        var pieces: [(String, TimeInterval)] = []
-        var cursor = interval.start
-        while cursor < interval.end {
-            let dayEnd = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: cursor))!
-            let pieceEnd = min(dayEnd, interval.end)
-            pieces.append((formatter.string(from: cursor), pieceEnd.timeIntervalSince(cursor)))
-            cursor = pieceEnd
-        }
-        return pieces
-    }
+    static let noProject = TimeAccounting.noProject
+    static let noClient = TimeAccounting.noClient
+    static let noCategory = TimeAccounting.noCategory
 }
