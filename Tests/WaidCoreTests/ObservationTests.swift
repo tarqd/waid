@@ -72,6 +72,16 @@ final class ObservationTests: XCTestCase {
         XCTAssertEqual(try Store(path: fresh).activities(in: DateInterval(start: t0, duration: 60)).count, 1, "reopens")
     }
 
+    func testADatabaseFromANewerWaidIsRefusedAsNewer() throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try Database(path: path).execute("PRAGMA user_version = 99")
+        XCTAssertThrowsError(try Store(path: path)) {
+            XCTAssertTrue("\($0)".contains("newer version of waid"), "\($0)")
+            XCTAssertFalse("\($0)".contains("before observations"), "\($0)")
+        }
+    }
+
     func testANewDatabaseHoldsTheDefaultIdleThreshold() throws {
         XCTAssertEqual(try store.value(forKey: "idle_threshold_seconds"), "180")
     }

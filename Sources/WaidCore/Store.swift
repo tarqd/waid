@@ -216,6 +216,10 @@ public final class Store {
     private func migrate() throws {
         let version = Int(try db.query("PRAGMA user_version").first?.int("user_version") ?? 0)
         if version == Self.schemaVersion { return }
+        if version > Self.schemaVersion {
+            throw StoreError.invalid(
+                "the database has schema version \(version), from a newer version of waid than this one (\(Self.schemaVersion)); upgrade waid to open it")
+        }
         guard version == 0 else {
             throw StoreError.invalid(
                 "the database has schema version \(version), from before observations, and can't be migrated; move it aside to start fresh")
