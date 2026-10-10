@@ -31,6 +31,19 @@ final class RecorderTests: XCTestCase {
         XCTAssertEqual(spans[1].duration(), 0, "not extended across the sleep gap")
     }
 
+    func testRestartedRecorderClosesWhatItLeftOpen() throws {
+        let crashed = ActivityRecorder(store: store, maxGap: 15)
+        try crashed.record(ActivitySample(appName: "Xcode", title: "a.swift"), at: t0)
+        try crashed.record(ActivitySample(appName: "Xcode", title: "a.swift"), at: t0.addingTimeInterval(5))
+
+        let restarted = ActivityRecorder(store: store, maxGap: 15)
+        try restarted.record(ActivitySample(appName: "Safari", title: "Docs"), at: t0.addingTimeInterval(600))
+        let spans = try store.activities(in: DateInterval(start: t0, duration: 3600))
+        XCTAssertEqual(spans.map(\.title), ["a.swift", "Docs"])
+        XCTAssertEqual(spans.map(\.open), [false, true], "closed at its last heartbeat")
+        XCTAssertEqual(spans[0].duration(), 5)
+    }
+
     func testIdleTrimsTail() throws {
         let recorder = ActivityRecorder(store: store, maxGap: 15, idleThreshold: 60)
         let s = ActivitySample(appName: "Safari", title: "Docs")
