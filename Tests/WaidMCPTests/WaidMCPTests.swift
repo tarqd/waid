@@ -114,6 +114,81 @@ final class MCPServerTests: XCTestCase {
         _ = try call("record_agent_work", ["agent": "bad name!", "start": "2026-10-09", "title": "x"], expectError: true)
     }
 
+    func testTimeEntriesTakeAZoneOrTheZoneWhereYouWere() throws {
+        store.processZone = TimeZone(identifier: "America/New_York")!
+        // 22:00Z on the 9th is the 10th in Tokyo and still the 9th in New York.
+        let early = TimeRange.parseDate("2026-10-09T13:00:00Z")!
+        try store.insertActivity(start: early, end: early + 600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode"), zone: TimeZone(identifier: "Asia/Tokyo")!)
+        now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
+
+        let unzoned = try call("create_time_entry", ["start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z"])
+        XCTAssertEqual(unzoned["zone"], "Asia/Tokyo")
+        XCTAssertEqual(unzoned["start_date"], "2026-10-10")
+
+        let zoned = try call("create_time_entry", ["start": "2026-10-09T23:00:00Z", "end": "2026-10-09T23:30:00Z",
+                                                   "zone": "America/New_York"])
+        XCTAssertEqual(zoned["zone"], "America/New_York")
+        XCTAssertEqual(zoned["start_date"], "2026-10-09")
+        XCTAssertEqual(zoned["end_date"], "2026-10-09")
+
+        let moved = try call("update_time_entry", ["id": zoned["id"]!, "zone": "Asia/Tokyo"])
+        XCTAssertEqual(moved["zone"], "Asia/Tokyo")
+        XCTAssertEqual(moved["start_date"], "2026-10-10")
+
+        for tool in ["create_time_entry", "update_time_entry"] {
+            let error = try call(tool, ["id": zoned["id"]!, "start": "2026-10-09T20:00:00Z", "end": "2026-10-09T20:30:00Z",
+                                        "zone": "Mars/Olympus_Mons"], expectError: true)
+            XCTAssertTrue(error.stringValue?.contains("zone") == true, "names the argument: \(error)")
+        }
+    }
+
+    func testAnEntryWithNoObservationsTakesTheProcessZone() throws {
+        store.processZone = TimeZone(identifier: "America/New_York")!
+        now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
+        let entry = try call("create_time_entry", ["start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z"])
+        XCTAssertEqual(entry["zone"], "America/New_York")
+        XCTAssertEqual(entry["start_date"], "2026-10-09")
+    }
+
+    func testAgentWorkTakesTheZoneWhereYouWereAndStaysIdempotent() throws {
+        store.processZone = TimeZone(identifier: "UTC")!
+        let early = TimeRange.parseDate("2026-10-09T13:00:00Z")!
+        try store.insertActivity(start: early, end: early + 600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode"), zone: TimeZone(identifier: "Asia/Tokyo")!)
+        now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
+
+        let args: JSONValue = ["agent": "codex", "start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z",
+                               "title": "refactor", "external_id": "run-1"]
+        let first = try call("record_agent_work", args)
+        let again = try call("record_agent_work", args)
+        XCTAssertEqual(again["id"], first["id"])
+        XCTAssertEqual(again["zone"], "Asia/Tokyo")
+        XCTAssertEqual(again["local_date"], "2026-10-10")
+
+        // Two sessions' transcripts with UTC timestamps.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let projectDir = dir.appendingPathComponent("projects/-src-waid")
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("""
+            {"type":"user","sessionId":"s1","cwd":"/src/waid","timestamp":"2026-10-09T23:00:00Z","message":{"role":"user","content":"fix"}}
+            {"type":"assistant","sessionId":"s1","cwd":"/src/waid","timestamp":"2026-10-09T23:10:00Z","message":{"role":"assistant","content":"ok"}}
+            """.utf8).write(to: projectDir.appendingPathComponent("s1.jsonl"))
+        setenv("CLAUDE_CONFIG_DIR", dir.path, 1)
+        defer { unsetenv("CLAUDE_CONFIG_DIR") }
+
+        XCTAssertEqual(try call("import_agent_sessions")["segmentsUpserted"], 1)
+        XCTAssertEqual(try call("import_agent_sessions", ["full": true])["segmentsUpserted"], 1)
+
+        let imported = try call("query_activity", ["start": "2026-10-09T00:00:00Z", "end": "2026-10-11T00:00:00Z",
+                                                   "sources": ["agent:claude-code"]])
+        guard case .array(let spans) = imported else { return XCTFail("\(imported)") }
+        XCTAssertEqual(spans.count, 1, "re-importing doesn't duplicate")
+        XCTAssertEqual(spans.first?["zone"], "Asia/Tokyo")
+        XCTAssertEqual(spans.first?["local_date"], "2026-10-10")
+    }
+
     func testSuggestEditConfirmFlowAttributesAgent() throws {
         _ = try send(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Claude Code","version":"2"}}}"#)
         let t = TimeRange.parseDate("2026-10-09T09:00:00Z")!

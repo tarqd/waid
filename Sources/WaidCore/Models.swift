@@ -226,6 +226,8 @@ public struct NewTimeEntry: Sendable {
     public var origin: EntryOrigin
     public var author = "user"
     public var status = EntryStatus.confirmed
+    /// Where it happened. nil: the zone at its start (`Store.zone(at:fallback:)`).
+    public var zone: TimeZone?
 
     public init(
         start: Date, end: Date?, projectID: Int64? = nil, categoryID: Int64? = nil, title: String? = nil,
@@ -253,5 +255,7 @@ public struct TimeEntryChanges: Sendable {
     public var tags: [String]?
     public var billable: Bool?
     public var status: EntryStatus?
+    /// Moves the entry to another zone; its local dates follow.
+    public var zone: TimeZone?
     public init() {}
 }

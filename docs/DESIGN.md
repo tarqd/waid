@@ -83,6 +83,8 @@ The schema is one CREATE block of STRICT tables, and SQLite enforces the observa
 
 The closed-row trigger also freezes `open` and `external_id`: the trigger only guards rows that are closed and have no `external_id`, so reopening a row or giving it one would take it out of the trigger's reach and let its time be rewritten.
 
+A row written without a zone of its own takes the zone you were in at its start: the zone of the nearest earlier observation the daemon recorded, else the process zone (ADR-0002). Time entries and timers take this chain unless `create_time_entry` or `update_time_entry` is given a `zone` (an IANA identifier), and so do imported agent sessions and `record_agent_work`, whose transcripts carry UTC timestamps. Imported rows don't feed the chain, since their own zone came from it. An entry's local dates are recomputed in its zone on every write.
+
 Terms below (Summary, Evidence, Unlogged time, Report) are defined in [`GLOSSARY.md`](../GLOSSARY.md).
 
 Claimed time:

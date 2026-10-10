@@ -26,12 +26,25 @@ public final class Store {
     }
     private var fixedZone: TimeZone?
 
+    /// The zone you were in at `instant`: the zone of the nearest observation
+    /// recorded at or before it, else `fallback` (ADR-0002). Imported agent
+    /// observations don't count: their zone came from this same chain, not
+    /// from where you were.
+    public func zone(at instant: Date, fallback: TimeZone) throws -> TimeZone {
+        let row = try db.query(
+            """
+            SELECT zone FROM observations WHERE external_id IS NULL AND start_ts <= ?
+            ORDER BY start_ts DESC, id DESC LIMIT 1
+            """, [instant]).first
+        return row?.string("zone").flatMap(TimeZone.init(identifier:)) ?? fallback
+    }
+
     /// The zone a new row is stamped with, and the local dates of its first
-    /// and last instants there (see `localDates(start:end:in:)`). Today that
-    /// is `zone`, else `processZone`; ADR-0002's fallback chain (the zone of
-    /// the nearest earlier observation) belongs here.
-    func stamp(start: Date, end: Date? = nil, zone: TimeZone?) -> (zone: TimeZone, startDate: String, endDate: String?) {
-        let zone = zone ?? processZone
+    /// and last instants there (see `localDates(start:end:in:)`): `zone` if
+    /// given, else the zone at its start (`zone(at:fallback:)`), falling back
+    /// to the process zone.
+    func stamp(start: Date, end: Date? = nil, zone: TimeZone?) throws -> (zone: TimeZone, startDate: String, endDate: String?) {
+        let zone = try zone ?? self.zone(at: start, fallback: processZone)
         let dates = Self.localDates(start: start, end: end, in: zone)
         return (zone, dates.start, dates.end)
     }
@@ -265,7 +278,7 @@ public final class Store {
         start: Date, end: Date?, source: String, sample: ActivitySample = ActivitySample(),
         projectID: Int64? = nil, note: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
-        let stamped = stamp(start: start, zone: zone)
+        let stamped = try stamp(start: start, zone: zone ?? processZone)
         try db.run(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, open, zone, local_date,
@@ -297,12 +310,13 @@ public final class Store {
     /// Inserts or refreshes a focus observation keyed by `(source,
     /// externalID)` and returns its id. Used by importers so re-running them
     /// is idempotent. A project assigned by the user is never overwritten.
+    /// With no `zone`, it takes the zone at its start (`zone(at:fallback:)`).
     @discardableResult
     public func upsertExternal(
         source: String, externalID: String, start: Date, end: Date,
         title: String?, path: String?, meta: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
-        let stamped = stamp(start: start, zone: zone)
+        let stamped = try stamp(start: start, zone: zone)
         let row = try db.query(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, zone, local_date, external_id, title, path, meta)
