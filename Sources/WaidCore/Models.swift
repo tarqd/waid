@@ -64,7 +64,7 @@ public struct Activity: Codable, Equatable, Sendable {
     public var client: String?
 
     public func duration(now: Date = Date()) -> TimeInterval {
-        (end ?? now).timeIntervalSince(start)
+        TimeAccounting.end(start: start, end: end, now: now).timeIntervalSince(start)
     }
 }
 
@@ -197,7 +197,7 @@ public struct TimeEntry: Codable, Equatable, Sendable {
     public var category: String?
 
     public func duration(now: Date = Date()) -> TimeInterval {
-        (end ?? max(now, start)).timeIntervalSince(start)
+        TimeAccounting.end(start: start, end: end, now: now).timeIntervalSince(start)
     }
 }
 

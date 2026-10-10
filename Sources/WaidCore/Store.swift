@@ -301,7 +301,7 @@ public final class Store {
 
     /// Spans overlapping `range`, with project, category and client resolved.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter(), now: Date = Date()) throws -> [Activity] {
-        var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, ?) > ?"
+        var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, MAX(?, start_ts)) > ?"
         var params: [SQLBindable] = [range.end, now, range.start]
         if !filter.includeHidden { sql += " AND hidden = 0" }
         if let sources = filter.sources, !sources.isEmpty {

@@ -10,6 +10,9 @@ enum TimeAccounting {
     static let noClient = "(no client)"
     static let noCategory = "(no category)"
 
+    /// The range for all-time reports such as budget status.
+    static let allTime = DateInterval(start: .distantPast, end: .distantFuture)
+
     /// What a span can be grouped by. A nil project, client or category falls
     /// under the matching "(no …)" key.
     struct Labels {
@@ -20,11 +23,17 @@ enum TimeAccounting {
         var source: String?
     }
 
-    /// The part of a span that falls in `range`. A running span (no end) ends
-    /// at `now`, or at its start if that is later.
+    /// When a span ends. A running span (no end) ends at `now`, or at its
+    /// start if that is later, so it never counts negative or future time.
+    static func end(start: Date, end: Date?, now: Date) -> Date {
+        end ?? max(now, start)
+    }
+
+    /// The part of a span that falls in `range`, ending as `end(start:end:now:)` says.
     static func clip(start: Date, end: Date?, to range: DateInterval, now: Date) -> DateInterval {
+        let spanEnd = self.end(start: start, end: end, now: now)
         let start = max(start, range.start)
-        return DateInterval(start: start, end: max(start, min(end ?? max(now, start), range.end)))
+        return DateInterval(start: start, end: max(start, min(spanEnd, range.end)))
     }
 
     /// The keyed pieces of `interval` under `groupBy`. Day grouping splits at
