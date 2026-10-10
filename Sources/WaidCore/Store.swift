@@ -147,6 +147,15 @@ public final class Store {
         DROP TABLE rules;
         ALTER TABLE rules_new RENAME TO rules;
         """,
+        // Zone history (ADR-0001): which time zone you were in, and from when.
+        """
+        CREATE TABLE zone_history(
+            id INTEGER PRIMARY KEY,
+            zone TEXT NOT NULL,
+            effective_ts REAL NOT NULL
+        );
+        CREATE INDEX zone_history_effective ON zone_history(effective_ts);
+        """,
     ]
 
     public init(path: String) throws {
