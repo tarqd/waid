@@ -110,17 +110,31 @@ case "daemon":
         NSTimeZone.resetSystemTimeZone()
         do { try recorder.record(signal, at: Date(), zone: .current) } catch { log("recording failed: \(error)") }
     }
-    let center = NSWorkspace.shared.notificationCenter
-    let signals: [(Notification.Name, ActivityRecorder.Signal)] = [
-        (NSWorkspace.willSleepNotification, .sleep),
-        (NSWorkspace.screensDidSleepNotification, .lock),
-        (NSWorkspace.sessionDidResignActiveNotification, .lock),
-        (NSWorkspace.didWakeNotification, .wake),
-        (NSWorkspace.screensDidWakeNotification, .unlock),
-        (NSWorkspace.sessionDidBecomeActiveNotification, .unlock),
+    // Waking fires while the lock screen is still up, so once the screen is
+    // locked only an unlock or a return to this session ends it.
+    var screenLocked = false
+    let workspace = NSWorkspace.shared.notificationCenter
+    let distributed = DistributedNotificationCenter.default()
+    // (center, name, signal, whether it locks (true) or unlocks (false) the screen)
+    let signals: [(NotificationCenter, Notification.Name, ActivityRecorder.Signal, Bool?)] = [
+        (workspace, NSWorkspace.willSleepNotification, .sleep, nil),
+        (workspace, NSWorkspace.screensDidSleepNotification, .lock, nil),
+        (workspace, NSWorkspace.sessionDidResignActiveNotification, .lock, true),
+        (distributed, Notification.Name("com.apple.screenIsLocked"), .lock, true),
+        (workspace, NSWorkspace.didWakeNotification, .wake, nil),
+        (workspace, NSWorkspace.screensDidWakeNotification, .unlock, nil),
+        (workspace, NSWorkspace.sessionDidBecomeActiveNotification, .unlock, false),
+        (distributed, Notification.Name("com.apple.screenIsUnlocked"), .unlock, false),
     ]
-    for (name, signal) in signals {
-        center.addObserver(forName: name, object: nil, queue: .main) { _ in record(signal) }
+    for (center, name, signal, screenLock) in signals {
+        center.addObserver(forName: name, object: nil, queue: .main) { _ in
+            if let screenLock {
+                screenLocked = screenLock
+            } else if screenLocked && (signal == .wake || signal == .unlock) {
+                return
+            }
+            record(signal)
+        }
     }
     RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in
         // No frontmost app: nothing to sample, so open observations stop

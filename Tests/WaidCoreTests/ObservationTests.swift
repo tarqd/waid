@@ -24,15 +24,15 @@ final class ObservationTests: XCTestCase {
     func testOnlyOneObservationPerStreamAndSourceIsOpen() throws {
         let first = try store.insertActivity(start: t0, end: nil, source: Source.window, sample: editor)
         XCTAssertThrowsError(try store.insertActivity(start: t0 + 60, end: nil, source: Source.window, sample: editor))
-        try store.close(activityID: first, end: t0 + 30)
+        try store.close(observationID: first, end: t0 + 30)
         try store.insertActivity(start: t0 + 60, end: nil, source: Source.window, sample: editor)
     }
 
     func testAClosedWindowObservationKeepsItsTimeButNotItsOverrides() throws {
         let id = try store.insertActivity(start: t0, end: nil, source: Source.window, sample: editor)
-        try store.setEnd(activityID: id, end: t0 + 300)
-        try store.close(activityID: id, end: t0 + 600)
-        XCTAssertThrowsError(try store.setEnd(activityID: id, end: t0 + 900))
+        try store.setEnd(observationID: id, end: t0 + 300)
+        try store.close(observationID: id, end: t0 + 600)
+        XCTAssertThrowsError(try store.setEnd(observationID: id, end: t0 + 900))
         XCTAssertEqual(try store.activity(id: id)?.end, t0 + 600)
 
         let project = try store.ensureProject("waid")

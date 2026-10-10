@@ -80,9 +80,9 @@ final class ProfessionalServicesTests: XCTestCase {
         XCTAssertNil(spans[1].project)
         XCTAssertEqual(spans[1].client, "Acme", "matched by domain without a project")
 
-        let byClient = try store.evidence(in: .instants(day), groupBy: .client, now: now)
+        let byClient = try store.evidence(in: .instants(day), groupBy: .client)
         XCTAssertEqual(byClient.map(\.key), ["Acme"])
-        let byCategory = try store.evidence(in: .instants(day), groupBy: .category, now: now)
+        let byCategory = try store.evidence(in: .instants(day), groupBy: .category)
         XCTAssertEqual(Set(byCategory.map(\.key)), ["Meetings", TimeAccounting.noCategory])
     }
 

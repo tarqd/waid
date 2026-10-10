@@ -149,7 +149,7 @@ final class FilterTests: XCTestCase {
         func keys(_ configure: (inout Store.ActivityFilter) -> Void) throws -> [String] {
             var f = Store.ActivityFilter()
             configure(&f)
-            return try store.evidence(in: .instants(day), groupBy: .project, filter: f, now: now).map(\.key)
+            return try store.evidence(in: .instants(day), groupBy: .project, filter: f).map(\.key)
         }
         XCTAssertEqual(try keys { $0.projectID = beta.id }, ["Beta / Rollout"])
         XCTAssertEqual(try keys { $0.clientID = acme.clientID }, ["Acme / Phase 2"])

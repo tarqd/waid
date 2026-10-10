@@ -17,8 +17,8 @@ final class DurationTests: XCTestCase {
     func testRunningActivityStartingAfterNowCountsAsZero() throws {
         try store.work(ActivitySample(appName: "Xcode"), from: now + 600, to: now + 600)
         let listed = try store.activities(in: day)
-        XCTAssertEqual(listed.map { $0.duration(now: now) }, [0])
-        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now), [])
+        XCTAssertEqual(listed.map { $0.duration() }, [0])
+        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app), [])
     }
 
     func testRunningSpansCountUpToNow() throws {
@@ -28,7 +28,7 @@ final class DurationTests: XCTestCase {
         let project = try store.ensureProject("Acme / Phase 2")
         try store.startTimer(projectID: project.id, now: t0 + 1800)
 
-        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now).map(\.secondsBySource),
+        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app).map(\.secondsBySource),
                        [[Source.window: 2.0 * 3600]])
         XCTAssertEqual(try store.summary(in: .instants(day), groupBy: .project, now: now).groups.map(\.seconds), [1.5 * 3600])
         XCTAssertEqual(try store.timesheet(in: .instants(day), now: now).map(\.hours), [1.5])

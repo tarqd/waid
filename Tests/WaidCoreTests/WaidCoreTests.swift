@@ -105,7 +105,7 @@ final class RecorderStreamTests: XCTestCase {
 
         // Evidence counts present time: the 70 s pause is within the idle
         // threshold, and the locked hour is away.
-        let evidence = try store.evidence(in: .instants(DateInterval(start: t0, duration: 7200)), groupBy: .app, now: t0 + 3750)
+        let evidence = try store.evidence(in: .instants(DateInterval(start: t0, duration: 7200)), groupBy: .app)
         XCTAssertEqual(evidence, [Store.EvidenceRow(key: "Xcode", secondsBySource: [Source.window: 142])])
     }
 
@@ -140,7 +140,7 @@ final class RecorderStreamTests: XCTestCase {
         }
         let now = t0 + 3600
         let hour = DateInterval(start: t0, duration: 3600)
-        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .project, now: now),
+        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .project),
                        [Store.EvidenceRow(key: "Acme / Phase 2", secondsBySource: [Source.window: 3000])])
         let drafts = try store.suggestEntries(in: hour, now: now).map(\.entry)
         XCTAssertEqual(drafts.map { [$0.start.timeIntervalSince(t0) / 60, $0.duration() / 60] }, [[0, 30], [40, 20]])
@@ -169,6 +169,22 @@ final class RecorderStreamTests: XCTestCase {
         let locked = try store.observations(.locked, in: day)
         XCTAssertEqual(locked.map { [$0.start, $0.end].map { $0.timeIntervalSince(midnight) } }, [[86000, 86400], [86400, 87000]])
         XCTAssertEqual(locked.map(\.localDate), ["2026-10-10", "2026-10-11"])
+    }
+
+    func testInputEndingBeforeMidnightLeavesNoEmptyActiveObservationAfterIt() throws {
+        let midnight = TimeRange.parseDate("2026-10-10T00:00:00Z")!
+        let utc = TimeZone(identifier: "UTC")!
+        let recorder = ActivityRecorder(store: store, interval: 5)
+        try recorder.record(.sample(editor), at: midnight - 5, zone: utc)
+        try recorder.record(.sample(editor), at: midnight + 3, zone: utc)
+        // The next sample says input stopped 2 s before midnight.
+        var idle = editor
+        idle.idleSeconds = 10
+        try recorder.record(.sample(idle), at: midnight + 8, zone: utc)
+
+        let active = try store.observations(.active, in: DateInterval(start: midnight - 60, duration: 120))
+        XCTAssertEqual(active.map { [$0.start, $0.end].map { $0.timeIntervalSince(midnight) } }, [[-5, 0]])
+        XCTAssertEqual(active.map(\.open), [false])
     }
 }
 
