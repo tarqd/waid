@@ -205,7 +205,7 @@ public enum WaidTools {
 
             Tool(
                 name: "get_status",
-                description: "What the user is doing right now: current frontmost activity, running timer, today's unlogged minutes (and how many are billable), and when agent sessions were last imported.",
+                description: "What the user is doing right now: current frontmost activity, running timer, today's unlogged minutes (and how many are billable), when agent sessions were last imported, and the idle threshold in seconds (the longest pause in input that still counts as present).",
                 inputSchema: schema([:]), readOnly: true
             ) { _, _ in
                 let latest = try store.latestActivity(source: Source.window)
@@ -222,7 +222,24 @@ public enum WaidTools {
                     unloggedTodayMinutes: minutes(unlogged.seconds),
                     unloggedTodayBillableMinutes: minutes(unlogged.billableSeconds),
                     lastAgentImport: try store.value(forKey: "ingest.claude-code.last_run")
-                        .flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
+                        .flatMap(Double.init).map(Date.init(timeIntervalSince1970:)),
+                    idleThresholdSeconds: try store.idleThreshold())
+            },
+
+            Tool(
+                name: "set_idle_threshold",
+                description: """
+                    Read or change the idle threshold: the longest pause in input, in seconds, that still counts as \
+                    present. Default 180. Changing it re-reads every past day (evidence, suggestions, unlogged time) \
+                    without rewriting anything. Without seconds, returns the current value.
+                    """,
+                inputSchema: schema([
+                    "seconds": ["type": "integer", "minimum": 0, "maximum": .number(Store.idleThresholdLimits.upperBound),
+                                "description": "New threshold, 0 to 86400 (24 hours)."],
+                ])
+            ) { a, _ in
+                if let seconds = try a.int("seconds") { try store.setIdleThreshold(TimeInterval(seconds)) }
+                return IdleThresholdView(idleThresholdSeconds: try store.idleThreshold())
             },
 
             // MARK: Activities
@@ -799,11 +816,17 @@ struct Status: Encodable {
     var unloggedTodayMinutes: Double
     var unloggedTodayBillableMinutes: Double
     var lastAgentImport: Date?
+    var idleThresholdSeconds: TimeInterval
     enum CodingKeys: String, CodingKey {
         case now, current, runningTimer = "running_timer", unloggedTodayMinutes = "unlogged_today_minutes"
         case unloggedTodayBillableMinutes = "unlogged_today_billable_minutes"
-        case lastAgentImport = "last_agent_import"
+        case lastAgentImport = "last_agent_import", idleThresholdSeconds = "idle_threshold_seconds"
     }
+}
+
+struct IdleThresholdView: Encodable {
+    var idleThresholdSeconds: TimeInterval
+    enum CodingKeys: String, CodingKey { case idleThresholdSeconds = "idle_threshold_seconds" }
 }
 
 struct TimeGroupView: Encodable {
