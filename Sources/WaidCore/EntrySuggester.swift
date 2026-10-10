@@ -236,7 +236,7 @@ extension Store {
     /// The Summary of confirmed time entries (drafts optional), grouped by
     /// project, client, category or day. A status filter, when given, decides instead.
     public func summary(
-        in range: DateInterval, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
+        in range: ReportRange, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> Summary {
         guard [.project, .client, .category, .day].contains(groupBy) else {
@@ -244,20 +244,31 @@ extension Store {
         }
         let filter = filter.counting(drafts: includeDrafts)
         let dates = try localDates(fallback: calendar)
+        let intervals = dates.intervals(range)
         var totals: [String: (Double, Double)] = [:]
-        for entry in try timeEntries(in: range, filter: filter, now: now) {
-            let clipped = TimeAccounting.clip(start: entry.start, end: entry.end, to: range, now: now)
+        for entry in try TimeAccounting.hull(intervals).map({ try timeEntries(in: $0, filter: filter, now: now) }) ?? [] {
             let labels = TimeAccounting.Labels(project: entry.project, client: entry.client, category: entry.category)
-            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
-            where seconds > 0 {
-                var t = totals[key] ?? (0, 0)
-                t.0 += seconds
-                if entry.billable { t.1 += seconds }
-                totals[key] = t
+            for clipped in TimeAccounting.clip(start: entry.start, end: entry.end, to: intervals, now: now) {
+                for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
+                where seconds > 0 {
+                    var t = totals[key] ?? (0, 0)
+                    t.0 += seconds
+                    if entry.billable { t.1 += seconds }
+                    totals[key] = t
+                }
             }
         }
         return Summary(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
                                            groupBy: groupBy))
+    }
+
+    /// The Summary over exact instants.
+    public func summary(
+        in range: DateInterval, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
+        calendar: Calendar = .current, now: Date = Date()
+    ) throws -> Summary {
+        try summary(in: .instants(range), groupBy: groupBy, filter: filter, includeDrafts: includeDrafts,
+                    calendar: calendar, now: now)
     }
 
     // MARK: Unlogged time
@@ -283,7 +294,7 @@ extension Store {
     /// the bucket label's project and category, by the same rule as time entries
     /// (`Catalog.defaultBillable`).
     public func unloggedTime(
-        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
+        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
     ) throws -> UnloggedTime {
         guard [.project, .client, .category, .day].contains(groupBy) else {
@@ -298,14 +309,18 @@ extension Store {
             throw StoreError.invalid("unlogged time can't be filtered by \(unsupported.joined(separator: " or ")); "
                 + "it can be filtered by project, client or category")
         }
-        let range = DateInterval(start: range.start, end: max(range.start, min(range.end, now)))
+        let dates = try localDates(fallback: calendar)
+        // Nothing after now is unlogged yet.
+        let intervals = dates.intervals(range).compactMap { i in
+            i.start < now ? DateInterval(start: i.start, end: min(i.end, now)) : nil
+        }
+        guard let range = TimeAccounting.hull(intervals) else { return UnloggedTime(groups: []) }
         var confirmed = EntryFilter()
         confirmed.status = .confirmed
         let covered = try timeEntries(in: range, filter: confirmed, now: now).map {
             DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
         }
         let catalog = try catalog()
-        let dates = try localDates(fallback: calendar)
         var totals: [String: (Double, Double)] = [:]
         var observed = ActivityFilter()
         observed.includeHidden = filter.includeHidden
@@ -318,17 +333,27 @@ extension Store {
                 project: project?.path ?? "#\(label.projectID)", client: project?.client,
                 category: label.categoryID.flatMap { catalog.categories[$0]?.name })
             let billable = catalog.defaultBillable(projectID: label.projectID, categoryID: label.categoryID)
-            for piece in EntrySuggester.subtract(covered, from: bucket) {
-                for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, dates: dates) {
-                    var t = totals[key] ?? (0, 0)
-                    t.0 += seconds
-                    if billable { t.1 += seconds }
-                    totals[key] = t
+            for uncovered in EntrySuggester.subtract(covered, from: bucket) {
+                for piece in TimeAccounting.clip(start: uncovered.start, end: uncovered.end, to: intervals, now: now) {
+                    for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, dates: dates) {
+                        var t = totals[key] ?? (0, 0)
+                        t.0 += seconds
+                        if billable { t.1 += seconds }
+                        totals[key] = t
+                    }
                 }
             }
         }
         return UnloggedTime(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
                                                 groupBy: groupBy))
+    }
+
+    /// Unlogged time over exact instants.
+    public func unloggedTime(
+        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
+        using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
+    ) throws -> UnloggedTime {
+        try unloggedTime(in: .instants(range), groupBy: groupBy, filter: filter, using: suggester, calendar: calendar, now: now)
     }
 
     private static func sorted(_ rows: [TimeGroup], groupBy: GroupBy) -> [TimeGroup] {

@@ -356,23 +356,33 @@ public final class Store {
     /// Evidence: activity totals per source, to help write time entries.
     /// Observed time, never claimed time, so never summed across sources.
     public func evidence(
-        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
+        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> [EvidenceRow] {
         let dates = try localDates(fallback: calendar)
+        let intervals = dates.intervals(range)
         var totals: [String: [String: Double]] = [:]
-        for activity in try activities(in: range, filter: filter, now: now) {
-            let clipped = TimeAccounting.clip(start: activity.start, end: activity.end, to: range, now: now)
+        for activity in try TimeAccounting.hull(intervals).map({ try activities(in: $0, filter: filter, now: now) }) ?? [] {
             let labels = TimeAccounting.Labels(project: activity.project, client: activity.client,
                                                category: activity.category, app: activity.appName, source: activity.source)
-            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
-            where seconds > 0 {
-                totals[key, default: [:]][activity.source, default: 0] += seconds
+            for clipped in TimeAccounting.clip(start: activity.start, end: activity.end, to: intervals, now: now) {
+                for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
+                where seconds > 0 {
+                    totals[key, default: [:]][activity.source, default: 0] += seconds
+                }
             }
         }
         return TimeAccounting.sorted(
             totals.map { EvidenceRow(key: $0.key, secondsBySource: $0.value) }, groupBy: groupBy,
             key: \.key, seconds: { $0.secondsBySource.values.reduce(0, +) })
+    }
+
+    /// Evidence over exact instants.
+    public func evidence(
+        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
+        calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [EvidenceRow] {
+        try evidence(in: .instants(range), groupBy: groupBy, filter: filter, calendar: calendar, now: now)
     }
 }
 
