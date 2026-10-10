@@ -31,8 +31,8 @@ final class LocalDateTests: XCTestCase {
     }
 
     private func observe(_ start: String, _ end: String, in zone: TimeZone, project: Project? = nil) throws {
-        try store.insertActivity(start: TimeRange.parseDate(start)!, end: TimeRange.parseDate(end)!, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode"), projectID: project?.id, zone: zone)
+        try store.work(ActivitySample(appName: "Xcode"), from: TimeRange.parseDate(start)!, to: TimeRange.parseDate(end)!,
+                       zone: zone, projectID: project?.id)
     }
 
     func testATokyoWeekIsReportedAsTokyoDatesFromNewYork() throws {

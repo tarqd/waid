@@ -39,18 +39,6 @@ enum TimeAccounting {
         return DateInterval(start: start, end: max(start, min(spanEnd, range.end)))
     }
 
-    /// The part of an observation `range` counts: all of it on a date range,
-    /// which selected it by its stored local date, else the part within the
-    /// range's instants. nil when nothing of it is in the range.
-    static func counted(start: Date, end: Date?, in range: ReportRange, now: Date) -> DateInterval? {
-        let interval: DateInterval
-        switch range {
-        case .localDates: interval = clip(start: start, end: end, to: allTime, now: now)
-        case .instants(let instants): interval = clip(start: start, end: end, to: instants, now: now)
-        }
-        return interval.duration > 0 ? interval : nil
-    }
-
     /// The pieces of a time entry `range` counts, each on its own local date
     /// in the entry's zone: split at that zone's midnights, then kept when
     /// its date is in the range's dates, or clipped to the range's instants.
@@ -79,6 +67,77 @@ enum TimeAccounting {
             cursor = pieceEnd
         }
         return pieces
+    }
+
+    /// The parts of `counted` that fall in any of `intervals`: what an
+    /// Activity contributes to a range.
+    static func clip(_ counted: [DateInterval], to intervals: [DateInterval]) -> [DateInterval] {
+        counted.flatMap { piece in intersect(piece, with: intervals) }
+    }
+
+    // MARK: Attribution
+
+    /// `intervals` in order, overlapping or touching ones merged, and gaps no
+    /// longer than `bridging` filled in.
+    static func merge(_ intervals: [DateInterval], bridging gap: TimeInterval = 0) -> [DateInterval] {
+        var merged: [DateInterval] = []
+        for interval in intervals.sorted(by: { $0.start < $1.start }) {
+            if let last = merged.last, interval.start.timeIntervalSince(last.end) <= gap {
+                merged[merged.count - 1] = DateInterval(start: last.start, end: max(last.end, interval.end))
+            } else {
+                merged.append(interval)
+            }
+        }
+        return merged
+    }
+
+    /// Present(T) (GLOSSARY.md): the active stream with gaps up to `threshold`
+    /// bridged. The active observations should cover the range of interest
+    /// widened by `threshold` on both sides, so a gap at its edge is judged
+    /// by the input on its far side.
+    static func present(active: [DateInterval], threshold: TimeInterval) -> [DateInterval] {
+        merge(active, bridging: threshold)
+    }
+
+    /// The parts of `interval` inside any of `intervals`, which are disjoint and in order.
+    static func intersect(_ interval: DateInterval, with intervals: [DateInterval]) -> [DateInterval] {
+        intervals.compactMap { other in
+            let start = max(interval.start, other.start), end = min(interval.end, other.end)
+            return start < end ? DateInterval(start: start, end: end) : nil
+        }
+    }
+
+    /// `intervals` with every part covered by `holes` cut out.
+    static func subtract(_ holes: [DateInterval], from intervals: [DateInterval]) -> [DateInterval] {
+        var pieces = intervals
+        for hole in holes {
+            pieces = pieces.flatMap { piece -> [DateInterval] in
+                guard hole.start < piece.end, hole.end > piece.start else { return [piece] }
+                var out: [DateInterval] = []
+                if hole.start > piece.start { out.append(DateInterval(start: piece.start, end: hole.start)) }
+                if hole.end < piece.end { out.append(DateInterval(start: hole.end, end: piece.end)) }
+                return out
+            }
+        }
+        return pieces
+    }
+
+    /// The attribution rule: the intervals an Activity counts. A window
+    /// observation counts its extent where you were present and the machine
+    /// wasn't locked. Any other source (an agent session) counts its full
+    /// extent: it says nothing about whether you were present, and runs
+    /// behind a locked screen.
+    static func counted(
+        extent: DateInterval, source: String, present: [DateInterval], locked: [DateInterval]
+    ) -> [DateInterval] {
+        guard source == Source.window else { return extent.duration > 0 ? [extent] : [] }
+        return subtract(locked, from: intersect(extent, with: present))
+    }
+
+    /// The smallest interval holding all of `intervals`, for picking spans to clip.
+    static func hull(_ intervals: [DateInterval]) -> DateInterval? {
+        guard let first = intervals.first, let last = intervals.last else { return nil }
+        return DateInterval(start: first.start, end: last.end)
     }
 
     /// The key a span's time on local date `day` is grouped under.

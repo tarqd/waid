@@ -384,7 +384,7 @@ public final class Store {
     }
 
     public func activity(id: Int64) throws -> Activity? {
-        try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).first.map(Self.activity)
+        try attribute(try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).map(Self.activity)).first
     }
 
     /// Hides observations from queries and reports, or unhides them. Returns rows changed.
@@ -398,9 +398,9 @@ public final class Store {
     }
 
     public func latestActivity(source: String) throws -> Activity? {
-        try db.query(
+        try attribute(try db.query(
             "SELECT * FROM observations WHERE stream = 'focus' AND source = ? ORDER BY start_ts DESC LIMIT 1", [source]
-        ).first.map(Self.activity)
+        ).map(Self.activity)).first
     }
 
     public struct ActivityFilter {
@@ -416,7 +416,8 @@ public final class Store {
         public init() {}
     }
 
-    /// Spans overlapping `range`, with project, category and client resolved.
+    /// Activities whose extent overlaps `range`, with project, category and
+    /// client resolved and their counted intervals filled in.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter()) throws -> [Activity] {
         try activities(where: "start_ts < ? AND end_ts > ?", [range.end, range.start], filter: filter)
     }
@@ -462,7 +463,7 @@ public final class Store {
             result.append(activity)
             if let limit = filter.limit, result.count >= limit { break }
         }
-        return result
+        return try attribute(result)
     }
 
     private static func activity(_ row: Row) -> Activity {
@@ -500,9 +501,7 @@ public final class Store {
         for activity in try activities(in: range, filter: filter) {
             let keys = TimeAccounting.GroupKeys(project: activity.project, client: activity.client,
                                                 category: activity.category, app: activity.appName, source: activity.source)
-            guard let counted = TimeAccounting.counted(start: activity.start, end: activity.end, in: range, now: now)
-            else { continue }
-            tally.add(counted.duration, day: activity.localDate, groupBy: groupBy, keys: keys) {
+            tally.add(activity.duration(in: range), day: activity.localDate, groupBy: groupBy, keys: keys) {
                 Key(key: $0, source: activity.source)
             }
         }

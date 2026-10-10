@@ -315,7 +315,8 @@ public enum WaidTools {
                 var f = Store.ActivityFilter()
                 f.uncategorizedOnly = true
                 var groups: [String: UncategorizedGroup] = [:]
-                for activity in try store.activities(in: try range(a), filter: f) {
+                let selection = try range(a)
+                for activity in try store.activities(in: selection, filter: f) {
                     let (field, value): (String, String)
                     if let host = activity.url.flatMap({ URL(string: $0)?.host }) {
                         (field, value) = ("url", host)
@@ -329,7 +330,8 @@ public enum WaidTools {
                     var group = groups[key] ?? UncategorizedGroup(
                         source: activity.source, field: field, value: value, app: activity.appName,
                         client: activity.client, category: activity.category, minutes: 0, examples: [])
-                    group.minutes += activity.duration(now: now()) / 60
+                    // Each activity's counted time in the range.
+                    group.minutes += activity.duration(in: selection) / 60
                     if let title = activity.title, group.examples.count < 5, !group.examples.contains(title) {
                         group.examples.append(title)
                     }

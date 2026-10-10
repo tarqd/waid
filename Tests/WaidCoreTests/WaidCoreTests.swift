@@ -44,8 +44,8 @@ final class RecorderTests: XCTestCase {
         XCTAssertEqual(spans[0].duration(), 5)
     }
 
-    func testIdleTrimsTail() throws {
-        let recorder = ActivityRecorder(store: store, interval: 5, idleThreshold: 60)
+    func testIdleKeepsTheExtentAndCountsOnlyThePresentTime() throws {
+        let recorder = ActivityRecorder(store: store, interval: 5)
         let s = ActivitySample(appName: "Safari", title: "Docs")
         var idle = s
         for i in 0...20 {
@@ -54,6 +54,7 @@ final class RecorderTests: XCTestCase {
         }
         let spans = try store.activities(in: DateInterval(start: t0, duration: 3600))
         XCTAssertEqual(spans.count, 1)
+        XCTAssertEqual(spans[0].end, t0 + 100, "not trimmed")
         XCTAssertEqual(spans[0].duration(), 30, accuracy: 0.001)
     }
 }
@@ -78,13 +79,13 @@ final class RecorderStreamTests: XCTestCase {
     }
 
     func testAScriptedDayWritesFocusActiveAndLockedObservations() throws {
-        let recorder = ActivityRecorder(store: store, interval: 5, idleThreshold: 60)
+        let recorder = ActivityRecorder(store: store, interval: 5)
         func sample(_ at: Double, idle: Double = 0) throws {
             var s = editor
             s.idleSeconds = idle
             try recorder.record(.sample(s), at: t0 + at, zone: berlin)
         }
-        // Input until +30, then a pause until the idle threshold trips at +90.
+        // Input until +30, then a pause without input until +90.
         for t in stride(from: 0.0, through: 30, by: 5) { try sample(t) }
         for t in stride(from: 35.0, through: 90, by: 5) { try sample(t, idle: t - 30) }
         // Input again, then the screen locks and the machine sleeps an hour.
@@ -95,16 +96,17 @@ final class RecorderStreamTests: XCTestCase {
         try recorder.record(.unlock, at: t0 + 3725, zone: berlin)
         for t in stride(from: 3730.0, through: 3750, by: 5) { try sample(t) }
 
-        XCTAssertEqual(try spans(.focus), [[0, 30, 0], [100, 122, 0], [3730, 3750, 1]], "focus keeps its idle trim")
+        XCTAssertEqual(try spans(.focus), [[0, 122, 0], [3730, 3750, 1]], "focus is never trimmed")
         XCTAssertEqual(try spans(.active), [[0, 30, 0], [100, 122, 0], [3730, 3750, 1]])
         XCTAssertEqual(try spans(.locked), [[122, 3722, 0]], "wake closes it; the later unlock changes nothing")
         let observed = try store.observations(.locked, in: DateInterval(start: t0, duration: 7200))
         XCTAssertEqual(observed.map(\.zone), ["Europe/Berlin"])
         XCTAssertEqual(observed.map(\.localDate), ["2026-10-09"])
 
-        // Evidence is still the trimmed focus stream.
+        // Evidence counts present time: the 70 s pause is within the idle
+        // threshold, and the locked hour is away.
         let evidence = try store.evidence(in: .instants(DateInterval(start: t0, duration: 7200)), groupBy: .app, now: t0 + 3750)
-        XCTAssertEqual(evidence, [Store.EvidenceRow(key: "Xcode", secondsBySource: [Source.window: 72])])
+        XCTAssertEqual(evidence, [Store.EvidenceRow(key: "Xcode", secondsBySource: [Source.window: 142])])
     }
 
     func testARestartedRecorderClosesEveryStreamAtItsStoredEndAndCarriesOn() throws {
@@ -126,7 +128,7 @@ final class RecorderStreamTests: XCTestCase {
         XCTAssertEqual(try spans(.active), [[0, 12, 0], [600, 605, 0], [700, 700, 1]])
     }
 
-    func testEvidenceAndSuggestionsFromRecordedSamplesStillTrimIdleTime() throws {
+    func testEvidenceAndSuggestionsFromRecordedSamplesCountOnlyPresentTime() throws {
         let acme = try store.ensureProject("Acme / Phase 2")
         try store.addRule(projectID: acme.id, field: .title, op: .contains, pattern: "acme")
         let recorder = ActivityRecorder(store: store, interval: 5)
@@ -211,11 +213,7 @@ final class EvidenceTests: XCTestCase {
         let store = try Store(path: ":memory:")
         store.processZone = calendar.timeZone
         let midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 9))!
-        // The recorder closes and reopens at local midnight.
-        try store.insertActivity(start: midnight - 1800, end: midnight, source: Source.window,
-                                 sample: ActivitySample(appName: "Terminal"))
-        try store.insertActivity(start: midnight, end: midnight + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Terminal"))
+        try store.work(ActivitySample(appName: "Terminal"), from: midnight - 1800, to: midnight + 3600)
         try store.insertActivity(start: midnight, end: midnight + 600, source: Source.agent("claude-code"))
 
         let rows = try store.evidence(in: .instants(DateInterval(start: midnight - 86400, end: midnight + 86400)),
@@ -262,11 +260,7 @@ final class DaySplitTests: XCTestCase {
     func testUnloggedSplitsAtMidnightAndGroupsByClient() throws {
         let acme = try store.createProject(name: "Phase 2", clientID: try store.ensureClient(named: "Acme").id)
         try store.addRule(projectID: acme.id, field: .appName, op: .equals, pattern: "Xcode")
-        // The recorder closes and reopens at local midnight.
-        try store.insertActivity(start: midnight - 1800, end: midnight, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme"))
-        try store.insertActivity(start: midnight, end: midnight + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme"))
+        try store.work(ActivitySample(appName: "Xcode", title: "acme"), from: midnight - 1800, to: midnight + 3600)
 
         let days = try store.unloggedTime(in: .instants(range), groupBy: .day, now: now)
         XCTAssertEqual(days.groups.map(\.key), ["2026-10-08", "2026-10-09"])

@@ -54,11 +54,11 @@ final class MCPServerTests: XCTestCase {
 
     func testCategorizeFlow() throws {
         let t = now.addingTimeInterval(-3600)
-        try store.insertActivity(start: t, end: t + 1200, source: Source.window,
-                                 sample: ActivitySample(bundleID: "com.apple.Safari", appName: "Safari",
-                                                        title: "waid PR", url: "https://github.com/tarqd/waid/pull/2"))
-        try store.insertActivity(start: t + 1200, end: t + 1800, source: Source.window,
-                                 sample: ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh"))
+        try store.work(ActivitySample(bundleID: "com.apple.Safari", appName: "Safari",
+                                      title: "waid PR", url: "https://github.com/tarqd/waid/pull/2"),
+                       from: t, to: t + 1200)
+        try store.work(ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh"),
+                       from: t + 1200, to: t + 1800)
 
         let top = try call("top_uncategorized", ["range": "today"])
         guard case .array(let groups) = top else { return XCTFail("\(top)") }
@@ -90,6 +90,25 @@ final class MCPServerTests: XCTestCase {
         _ = try call("evidence", ["kind": "entries"], expectError: true)
     }
 
+    func testTopUncategorizedCountsPresentTimeInTheRange() throws {
+        let t = TimeRange.parseDate("2026-10-09T13:00:00Z")!
+        let terminal = ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh")
+        try store.work(terminal, from: t, to: t + 1800)
+        // The same window stays in front through 20 minutes without input, then 10 more of input.
+        let recorder = ActivityRecorder(store: store, interval: 60)
+        for minute in stride(from: 31.0, to: 50, by: 1) {
+            var idle = terminal
+            idle.idleSeconds = (minute - 30) * 60
+            try recorder.record(.sample(idle), at: t + minute * 60)
+        }
+        try store.work(terminal, from: t + 3000, to: t + 3600)
+
+        let top = try call("top_uncategorized", ["start": "2026-10-09T13:10:00Z", "end": "2026-10-09T15:00:00Z"])
+        guard case .array(let groups) = top else { return XCTFail("\(top)") }
+        XCTAssertEqual(groups.map { $0["value"] }, ["com.apple.Terminal"])
+        XCTAssertEqual(groups.first?["minutes"], 30, "20 present minutes in the range before the pause, 10 after")
+    }
+
     func testTimersAndAgentWork() throws {
         let started = try call("start_timer", ["project": "Writing", "title": "blog"])
         XCTAssertEqual(started["started"]?["project"], "Writing")
@@ -118,8 +137,8 @@ final class MCPServerTests: XCTestCase {
         store.processZone = TimeZone(identifier: "America/New_York")!
         // 22:00Z on the 9th is the 10th in Tokyo and still the 9th in New York.
         let early = TimeRange.parseDate("2026-10-09T13:00:00Z")!
-        try store.insertActivity(start: early, end: early + 600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode"), zone: TimeZone(identifier: "Asia/Tokyo")!)
+        try store.work(ActivitySample(appName: "Xcode"),
+                       from: early, to: early + 600, zone: TimeZone(identifier: "Asia/Tokyo")!)
         now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
 
         let unzoned = try call("create_time_entry", ["start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z"])
@@ -154,8 +173,8 @@ final class MCPServerTests: XCTestCase {
     func testAgentWorkTakesTheZoneWhereYouWereAndStaysIdempotent() throws {
         store.processZone = TimeZone(identifier: "UTC")!
         let early = TimeRange.parseDate("2026-10-09T13:00:00Z")!
-        try store.insertActivity(start: early, end: early + 600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode"), zone: TimeZone(identifier: "Asia/Tokyo")!)
+        try store.work(ActivitySample(appName: "Xcode"),
+                       from: early, to: early + 600, zone: TimeZone(identifier: "Asia/Tokyo")!)
         now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
 
         let args: JSONValue = ["agent": "codex", "start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z",
@@ -192,8 +211,8 @@ final class MCPServerTests: XCTestCase {
     func testSuggestEditConfirmFlowAttributesAgent() throws {
         _ = try send(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Claude Code","version":"2"}}}"#)
         let t = TimeRange.parseDate("2026-10-09T09:00:00Z")!
-        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "Store.swift", path: "/src/waid/Store.swift"))
+        try store.work(ActivitySample(appName: "Xcode", title: "Store.swift", path: "/src/waid/Store.swift"),
+                       from: t, to: t + 3600)
         _ = try call("create_rule", ["project": "waid", "field": "path", "op": "prefix", "pattern": "/src/waid"])
 
         let unlogged = try call("evidence", ["range": "today", "kind": "unlogged"])
@@ -277,10 +296,10 @@ final class MCPServerTests: XCTestCase {
         _ = try call("create_project", ["name": "Phase 2", "client": "Acme"])
         _ = try call("create_rule", ["project": "Acme / Phase 2", "field": "title", "op": "contains", "pattern": "acme"])
         _ = try call("create_rule", ["category": "Presales", "field": "app_name", "op": "equals", "pattern": "Keynote"])
-        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme-integration"))
-        try store.insertActivity(start: t + 3600, end: t + 5400, source: Source.window,
-                                 sample: ActivitySample(appName: "Keynote", title: "Acme pitch"))
+        try store.work(ActivitySample(appName: "Xcode", title: "acme-integration"),
+                       from: t, to: t + 3600)
+        try store.work(ActivitySample(appName: "Keynote", title: "Acme pitch"),
+                       from: t + 3600, to: t + 5400)
 
         let unlogged = try call("evidence", ["range": "today", "kind": "unlogged"])
         XCTAssertEqual(unlogged["groups"], [["key": "Acme / Phase 2", "minutes": 90, "billable_minutes": 60]])
@@ -342,10 +361,10 @@ final class MCPServerTests: XCTestCase {
 
     func testFiltersAndGroupBysWorkOrSayWhyNot() throws {
         let t = TimeRange.parseDate("2026-10-09T09:00:00Z")!
-        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme code"))
-        try store.insertActivity(start: t + 3600, end: t + 5400, source: Source.window,
-                                 sample: ActivitySample(appName: "Safari", title: "beta docs"))
+        try store.work(ActivitySample(appName: "Xcode", title: "acme code"),
+                       from: t, to: t + 3600)
+        try store.work(ActivitySample(appName: "Safari", title: "beta docs"),
+                       from: t + 3600, to: t + 5400)
         _ = try call("create_project", ["name": "Phase 2", "client": "Acme"])
         _ = try call("create_project", ["name": "Rollout", "client": "Beta"])
         _ = try call("create_rule", ["project": "Acme / Phase 2", "field": "app_name", "op": "equals", "pattern": "Xcode"])

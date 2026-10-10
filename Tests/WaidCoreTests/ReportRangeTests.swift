@@ -33,8 +33,8 @@ final class ReportRangeTests: XCTestCase {
     }
 
     private func observe(_ start: String, _ end: String, in zone: TimeZone, project: Project? = nil) throws {
-        try store.insertActivity(start: TimeRange.parseDate(start)!, end: TimeRange.parseDate(end)!, source: Source.window,
-                                 sample: ActivitySample(appName: "Mail"), projectID: project?.id, zone: zone)
+        try store.work(ActivitySample(appName: "Mail"), from: TimeRange.parseDate(start)!, to: TimeRange.parseDate(end)!,
+                       zone: zone, projectID: project?.id)
     }
 
     private func dates(_ first: String, _ last: String? = nil) -> ReportRange {
@@ -104,11 +104,10 @@ final class ReportRangeTests: XCTestCase {
 
     /// Flying home from Tokyo on Friday night lives Friday and Saturday twice.
     private func flyingHome(_ project: Project) throws {
-        try observe("2026-10-09T22:00:00+09:00", "2026-10-10T00:00:00+09:00", in: tokyo, project: project)
-        try observe("2026-10-10T00:00:00+09:00", "2026-10-10T01:00:00+09:00", in: tokyo, project: project)
+        // The recorder closes and reopens at each local midnight.
+        try observe("2026-10-09T22:00:00+09:00", "2026-10-10T01:00:00+09:00", in: tokyo, project: project)
         // Landed: Saturday 01:00 in Tokyo is Friday 12:00 in New York.
-        try observe("2026-10-09T12:00:00-04:00", "2026-10-10T00:00:00-04:00", in: newYork, project: project)
-        try observe("2026-10-10T00:00:00-04:00", "2026-10-10T02:00:00-04:00", in: newYork, project: project)
+        try observe("2026-10-09T12:00:00-04:00", "2026-10-10T02:00:00-04:00", in: newYork, project: project)
     }
 
     func testADateLivedInTwoZonesSelectsItsTimeInBoth() throws {
