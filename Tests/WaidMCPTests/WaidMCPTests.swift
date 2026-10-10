@@ -90,6 +90,25 @@ final class MCPServerTests: XCTestCase {
         _ = try call("evidence", ["kind": "entries"], expectError: true)
     }
 
+    func testTopUncategorizedCountsPresentTimeInTheRange() throws {
+        let t = TimeRange.parseDate("2026-10-09T13:00:00Z")!
+        let terminal = ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh")
+        try store.work(terminal, from: t, to: t + 1800)
+        // The same window stays in front through 20 minutes without input, then 10 more of input.
+        let recorder = ActivityRecorder(store: store, interval: 60)
+        for minute in stride(from: 31.0, to: 50, by: 1) {
+            var idle = terminal
+            idle.idleSeconds = (minute - 30) * 60
+            try recorder.record(.sample(idle), at: t + minute * 60)
+        }
+        try store.work(terminal, from: t + 3000, to: t + 3600)
+
+        let top = try call("top_uncategorized", ["start": "2026-10-09T13:10:00Z", "end": "2026-10-09T15:00:00Z"])
+        guard case .array(let groups) = top else { return XCTFail("\(top)") }
+        XCTAssertEqual(groups.map { $0["value"] }, ["com.apple.Terminal"])
+        XCTAssertEqual(groups.first?["minutes"], 30, "20 present minutes in the range before the pause, 10 after")
+    }
+
     func testTimersAndAgentWork() throws {
         let started = try call("start_timer", ["project": "Writing", "title": "blog"])
         XCTAssertEqual(started["started"]?["project"], "Writing")
