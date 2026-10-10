@@ -2,7 +2,7 @@ import Foundation
 
 /// A calendar date with no zone attached, such as "2026-10-09": the Local date
 /// a span falls on (GLOSSARY.md). Which instants it covers depends on the zone
-/// history.
+/// it is read in.
 public struct LocalDate: Hashable, Comparable, Sendable, CustomStringConvertible {
     public var year: Int
     public var month: Int
@@ -61,7 +61,8 @@ public struct LocalDate: Hashable, Comparable, Sendable, CustomStringConvertible
 }
 
 /// What a report covers: whole Local dates (named ranges and date-only
-/// inputs), or exact instants (explicit timestamps). See ADR-0001.
+/// inputs), selected by the local dates stored on each row, or exact instants
+/// (explicit timestamps). See ADR-0002.
 public enum ReportRange: Equatable, Sendable {
     case localDates(ClosedRange<LocalDate>)
     case instants(DateInterval)
