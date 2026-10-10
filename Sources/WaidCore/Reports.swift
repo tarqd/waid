@@ -57,13 +57,13 @@ extension Store {
         public var notes: [String]
     }
 
-    /// One row per day × project × category, from confirmed entries.
+    /// One row per day × project × category, from confirmed entries (drafts
+    /// optional; a status filter, when given, decides instead).
     public func timesheet(
         in range: DateInterval, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> [TimesheetRow] {
-        var filter = filter
-        if !includeDrafts { filter.status = .confirmed }
+        let filter = filter.counting(drafts: includeDrafts)
         struct Key: Hashable { var date: String; var projectID: Int64?; var categoryID: Int64? }
         let dates = try localDates(fallback: calendar)
         var rows: [Key: TimesheetRow] = [:]
