@@ -58,28 +58,22 @@ extension Store {
     /// One row per day × project × category, from confirmed entries (drafts
     /// optional; a status filter, when given, decides instead).
     public func timesheet(
-        in range: ReportRange, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
-        calendar: Calendar = .current, now: Date = Date()
+        in range: ReportRange, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false, now: Date = Date()
     ) throws -> [TimesheetRow] {
         struct Key: Hashable { var date: String; var projectID: Int64?; var categoryID: Int64? }
-        let dates = try localDates(fallback: calendar)
-        let intervals = dates.intervals(range)
         var tally = TimeAccounting.Tally<Key>()
         var rows: [Key: TimesheetRow] = [:]
-        for entry in try timeEntries(overlapping: intervals, filter: filter.counting(drafts: includeDrafts), now: now) {
-            let keys = TimeAccounting.GroupKeys(project: entry.project, client: entry.client, category: entry.category)
-            func key(_ date: String) -> Key { Key(date: date, projectID: entry.projectID, categoryID: entry.categoryID) }
-            for clipped in TimeAccounting.clip(start: entry.start, end: entry.end, to: intervals, now: now) {
-                tally.add(clipped, groupBy: .day, keys: keys, dates: dates, billable: entry.billable, as: key)
-                for (date, _) in dates.split(clipped) {
-                    var row = rows[key(date)] ?? TimesheetRow(
-                        date: date, client: entry.client, project: entry.project, category: entry.category,
-                        hours: 0, billableHours: 0, notes: [])
-                    for note in [entry.title, entry.notes].compactMap({ $0 }) where !note.isEmpty && !row.notes.contains(note) {
-                        row.notes.append(note)
-                    }
-                    rows[key(date)] = row
+        for entry in try timeEntries(in: range, filter: filter.counting(drafts: includeDrafts), now: now) {
+            for (date, piece) in days(of: entry, in: range, now: now) {
+                let key = Key(date: date, projectID: entry.projectID, categoryID: entry.categoryID)
+                tally.add(piece.duration, to: key, billable: entry.billable)
+                var row = rows[key] ?? TimesheetRow(
+                    date: date, client: entry.client, project: entry.project, category: entry.category,
+                    hours: 0, billableHours: 0, notes: [])
+                for note in [entry.title, entry.notes].compactMap({ $0 }) where !note.isEmpty && !row.notes.contains(note) {
+                    row.notes.append(note)
                 }
+                rows[key] = row
             }
         }
         for (key, total) in tally.totals {

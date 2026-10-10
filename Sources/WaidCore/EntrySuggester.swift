@@ -179,38 +179,26 @@ extension Store {
         public var contributors: [EntrySuggester.Contributor]
     }
 
-    /// Replaces earlier suggested drafts on `range`'s local dates (or in its
-    /// instants) with fresh ones. Confirmed entries and drafts the user created
-    /// are left alone and never overlapped. When a local date repeats, each of
-    /// its stretches is suggested for on its own, and the gap between them,
-    /// which belongs to another date, is left alone.
+    /// Replaces earlier suggested drafts in `range` with fresh ones, built
+    /// from the activities it selects. Confirmed entries and drafts the user
+    /// created are left alone and never overlapped.
     public func suggestEntries(
         in range: ReportRange, using suggester: EntrySuggester = EntrySuggester(),
-        author: String = "user", calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [Suggestion] {
-        try suggestEntries(in: try intervals(range, calendar: calendar), using: suggester, author: author, now: now)
-    }
-
-    /// Replaces earlier suggested drafts in `range` with fresh ones.
-    public func suggestEntries(
-        in range: DateInterval, using suggester: EntrySuggester = EntrySuggester(),
         author: String = "user", now: Date = Date()
     ) throws -> [Suggestion] {
-        try suggestEntries(in: [range], using: suggester, author: author, now: now)
-    }
-
-    private func suggestEntries(
-        in intervals: [DateInterval], using suggester: EntrySuggester, author: String, now: Date
-    ) throws -> [Suggestion] {
         try db.transaction {
-            try Self.untilNow(intervals, now: now).flatMap { range in
+            // Days in other zones can share instants, so clear every stretch before filling any.
+            let stretches = try Self.contiguous(stretches(of: range, filter: ActivityFilter(), now: now))
+            for stretch in stretches {
                 try db.run(
                     "DELETE FROM time_entries WHERE origin = ? AND status = ? AND start_ts < ? AND end_ts > ?",
-                    [EntryOrigin.suggested.rawValue, EntryStatus.draft.rawValue, range.end, range.start])
-                let occupied = try timeEntries(in: range, now: now).map {
+                    [EntryOrigin.suggested.rawValue, EntryStatus.draft.rawValue, stretch.interval.end, stretch.interval.start])
+            }
+            return try stretches.flatMap { stretch in
+                let occupied = try timeEntries(in: stretch.interval, now: now).map {
                     DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
                 }
-                let blocks = suggester.blocks(from: try activities(in: range), in: range, avoiding: occupied)
+                let blocks = suggester.blocks(from: stretch.activities, in: stretch.interval, avoiding: occupied)
                 return try blocks.map { block in
                     var new = NewTimeEntry(start: block.start, end: block.end, projectID: block.label.projectID,
                                            categoryID: block.label.categoryID, title: block.title, origin: .suggested)
@@ -222,9 +210,64 @@ extension Store {
         }
     }
 
-    /// The parts of `intervals` up to `now`: nothing later can be suggested or unlogged yet.
-    private static func untilNow(_ intervals: [DateInterval], now: Date) -> [DateInterval] {
-        intervals.compactMap { $0.start < now ? DateInterval(start: $0.start, end: min($0.end, now)) : nil }
+    /// Replaces earlier suggested drafts in `range` with fresh ones.
+    public func suggestEntries(
+        in range: DateInterval, using suggester: EntrySuggester = EntrySuggester(),
+        author: String = "user", now: Date = Date()
+    ) throws -> [Suggestion] {
+        try suggestEntries(in: .instants(range), using: suggester, author: author, now: now)
+    }
+
+    /// A stretch of one local date to lay buckets over: the instants that
+    /// date covers in the zones its activities were stamped with (clipped to
+    /// an instant range, and to `now`), and those activities.
+    struct Stretch {
+        var day: LocalDate
+        var interval: DateInterval
+        var activities: [Activity]
+    }
+
+    /// One stretch per local date `range` selects activities on, in order.
+    func stretches(of range: ReportRange, filter: ActivityFilter, now: Date) throws -> [Stretch] {
+        let byDay = Dictionary(grouping: try activities(in: range, filter: filter)) { LocalDate($0.localDate)! }
+        return byDay.keys.sorted().flatMap { day -> [Stretch] in
+            let activities = byDay[day]!
+            let zones = Set(activities.map(\.zone)).compactMap(TimeZone.init(identifier:))
+            let days = zones.map { DateInterval(start: day.start(in: $0), end: day.adding(days: 1).start(in: $0)) }
+            return Self.union(days).compactMap { interval in
+                var start = interval.start, end = min(interval.end, now)
+                if case .instants(let instants) = range {
+                    start = max(start, instants.start)
+                    end = min(end, instants.end)
+                }
+                guard start < end else { return nil }
+                return Stretch(day: day, interval: DateInterval(start: start, end: end), activities: activities)
+            }
+        }
+    }
+
+    /// Joins stretches that follow on from each other, as consecutive days in
+    /// one zone do, so a block of work can run across midnight.
+    private static func contiguous(_ stretches: [Stretch]) -> [Stretch] {
+        stretches.reduce(into: []) { result, stretch in
+            if let last = result.last, last.interval.end == stretch.interval.start {
+                result[result.count - 1].interval = DateInterval(start: last.interval.start, end: stretch.interval.end)
+                result[result.count - 1].activities += stretch.activities
+            } else {
+                result.append(stretch)
+            }
+        }
+    }
+
+    /// Overlapping or touching intervals joined, in order.
+    private static func union(_ intervals: [DateInterval]) -> [DateInterval] {
+        intervals.sorted { $0.start < $1.start }.reduce(into: []) { result, interval in
+            if let last = result.last, interval.start <= last.end {
+                result[result.count - 1] = DateInterval(start: last.start, end: max(last.end, interval.end))
+            } else {
+                result.append(interval)
+            }
+        }
     }
 
     // MARK: Summary and Unlogged time
@@ -271,16 +314,14 @@ extension Store {
     /// project, client, category or day. A status filter, when given, decides instead.
     public func summary(
         in range: ReportRange, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
-        calendar: Calendar = .current, now: Date = Date()
+        now: Date = Date()
     ) throws -> Summary {
         try Self.requireTimeGrouping(groupBy, for: "time entries")
-        let dates = try localDates(fallback: calendar)
-        let intervals = dates.intervals(range)
         var tally = TimeAccounting.Tally<String>()
-        for entry in try timeEntries(overlapping: intervals, filter: filter.counting(drafts: includeDrafts), now: now) {
+        for entry in try timeEntries(in: range, filter: filter.counting(drafts: includeDrafts), now: now) {
             let keys = TimeAccounting.GroupKeys(project: entry.project, client: entry.client, category: entry.category)
-            for clipped in TimeAccounting.clip(start: entry.start, end: entry.end, to: intervals, now: now) {
-                tally.add(clipped, groupBy: groupBy, keys: keys, dates: dates, billable: entry.billable)
+            for (day, piece) in days(of: entry, in: range, now: now) {
+                tally.add(piece.duration, day: day, groupBy: groupBy, keys: keys, billable: entry.billable)
             }
         }
         return Summary(tally, groupBy: groupBy)
@@ -294,7 +335,7 @@ extension Store {
     /// same rule as time entries (`Catalog.defaultBillable`).
     public func unloggedTime(
         in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
-        using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
+        using suggester: EntrySuggester = EntrySuggester(), now: Date = Date()
     ) throws -> UnloggedTime {
         try Self.requireTimeGrouping(groupBy, for: "unlogged time")
         let unsupported = [
@@ -306,21 +347,18 @@ extension Store {
             throw StoreError.invalid("unlogged time can't be filtered by \(unsupported.joined(separator: " or ")); "
                 + "it can be filtered by project, client or category")
         }
-        let dates = try localDates(fallback: calendar)
-        let intervals = Self.untilNow(dates.intervals(range), now: now)
         var confirmed = EntryFilter()
         confirmed.status = .confirmed
-        let covered = try timeEntries(overlapping: intervals, filter: confirmed, now: now).map {
-            DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
-        }
         let catalog = try catalog()
         var observed = ActivityFilter()
         observed.includeHidden = filter.includeHidden
         var tally = TimeAccounting.Tally<String>()
-        // Buckets are laid out per stretch, as suggestEntries lays them out.
-        for interval in intervals {
-            let activities = try activities(in: interval, filter: observed)
-            for (bucket, label) in suggester.labeledBuckets(activities, range: interval) {
+        // Buckets are laid out per local date, each on the activities stamped with it.
+        for stretch in try stretches(of: range, filter: observed, now: now) {
+            let covered = try timeEntries(in: stretch.interval, filter: confirmed, now: now).map {
+                DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
+            }
+            for (bucket, label) in suggester.labeledBuckets(stretch.activities, range: stretch.interval) {
                 let project = catalog.projects[label.projectID]
                 if let projectID = filter.projectID, label.projectID != projectID { continue }
                 if let clientID = filter.clientID, project?.clientID != clientID { continue }
@@ -330,7 +368,7 @@ extension Store {
                     category: label.categoryID.flatMap { catalog.categories[$0]?.name })
                 let billable = catalog.defaultBillable(projectID: label.projectID, categoryID: label.categoryID)
                 for uncovered in EntrySuggester.subtract(covered, from: bucket) {
-                    tally.add(uncovered, groupBy: groupBy, keys: keys, dates: dates, billable: billable)
+                    tally.add(uncovered.duration, day: stretch.day.description, groupBy: groupBy, keys: keys, billable: billable)
                 }
             }
         }

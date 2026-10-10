@@ -105,6 +105,16 @@ public struct Activity: Codable, Equatable, Sendable {
     public func duration(in range: DateInterval) -> TimeInterval {
         TimeAccounting.clip(counted, to: [range]).reduce(0) { $0 + $1.duration }
     }
+
+    /// The time it counts in a report range: all of it on a date range,
+    /// which selects it by its stored local date, else the part within the
+    /// range's instants.
+    public func duration(in range: ReportRange) -> TimeInterval {
+        switch range {
+        case .localDates: return duration()
+        case .instants(let interval): return duration(in: interval)
+        }
+    }
 }
 
 /// Who the work is for. Domains (acme.com) attribute matching URLs to the client.

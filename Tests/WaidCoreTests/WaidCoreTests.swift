@@ -207,16 +207,17 @@ final class RuleTests: XCTestCase {
 }
 
 final class EvidenceTests: XCTestCase {
-    func testDayGroupingSplitsAtMidnightAndClipsToRange() throws {
+    func testDayGroupingUsesTheStoredLocalDateAndClipsToRange() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         let store = try Store(path: ":memory:")
+        store.processZone = calendar.timeZone
         let midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 9))!
         try store.work(ActivitySample(appName: "Terminal"), from: midnight - 1800, to: midnight + 3600)
         try store.insertActivity(start: midnight, end: midnight + 600, source: Source.agent("claude-code"))
 
         let rows = try store.evidence(in: .instants(DateInterval(start: midnight - 86400, end: midnight + 86400)),
-                                     groupBy: .day, calendar: calendar)
+                                     groupBy: .day)
         XCTAssertEqual(rows.map(\.key), ["2026-10-08", "2026-10-09"])
         XCTAssertEqual(rows[0].secondsBySource, ["window": 1800])
         XCTAssertEqual(rows[1].secondsBySource, ["window": 3600, "agent:claude-code": 600])
@@ -236,6 +237,7 @@ final class DaySplitTests: XCTestCase {
     override func setUpWithError() throws {
         calendar.timeZone = TimeZone(identifier: "UTC")!
         store = try Store(path: ":memory:")
+        store.processZone = calendar.timeZone
         midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 9))!
     }
 
@@ -244,12 +246,12 @@ final class DaySplitTests: XCTestCase {
         try store.createEntry(NewTimeEntry(start: midnight - 1800, end: midnight + 3600, projectID: waid.id,
                                            title: "late night", origin: .manual), now: now)
 
-        let days = try store.summary(in: .instants(range), groupBy: .day, calendar: calendar, now: now)
+        let days = try store.summary(in: .instants(range), groupBy: .day, now: now)
         XCTAssertEqual(days.groups.map(\.key), ["2026-10-08", "2026-10-09"])
         XCTAssertEqual(days.groups.map(\.seconds), [1800, 3600])
         XCTAssertEqual(days.seconds, 5400)
 
-        let rows = try store.timesheet(in: .instants(range), calendar: calendar, now: now)
+        let rows = try store.timesheet(in: .instants(range), now: now)
         XCTAssertEqual(rows.map(\.date), ["2026-10-08", "2026-10-09"])
         XCTAssertEqual(rows.map(\.hours), [0.5, 1])
         XCTAssertEqual(rows.map(\.notes), [["late night"], ["late night"]])
@@ -260,12 +262,12 @@ final class DaySplitTests: XCTestCase {
         try store.addRule(projectID: acme.id, field: .appName, op: .equals, pattern: "Xcode")
         try store.work(ActivitySample(appName: "Xcode", title: "acme"), from: midnight - 1800, to: midnight + 3600)
 
-        let days = try store.unloggedTime(in: .instants(range), groupBy: .day, calendar: calendar, now: now)
+        let days = try store.unloggedTime(in: .instants(range), groupBy: .day, now: now)
         XCTAssertEqual(days.groups.map(\.key), ["2026-10-08", "2026-10-09"])
         XCTAssertEqual(days.groups.map(\.seconds), [1800, 3600])
         XCTAssertEqual(days.seconds, 5400)
 
-        let clients = try store.unloggedTime(in: .instants(range), groupBy: .client, calendar: calendar, now: now)
+        let clients = try store.unloggedTime(in: .instants(range), groupBy: .client, now: now)
         XCTAssertEqual(clients.groups.map(\.key), ["Acme"])
         XCTAssertEqual(clients.groups.map(\.seconds), [5400])
         XCTAssertEqual(try store.unloggedTime(in: .instants(range), groupBy: .project, now: now).groups.map(\.key), ["Acme / Phase 2"])

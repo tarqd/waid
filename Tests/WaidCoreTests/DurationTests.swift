@@ -9,14 +9,9 @@ final class DurationTests: XCTestCase {
     let t0 = TimeRange.parseDate("2026-10-09T09:00:00Z")!
     var now: Date { t0 + 2 * 3600 }
     var day: DateInterval { DateInterval(start: t0 - 9 * 3600, duration: 86400) }
-    var utc: Calendar {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")!
-        return calendar
-    }
-
     override func setUpWithError() throws {
         store = try Store(path: ":memory:")
+        store.processZone = TimeZone(identifier: "UTC")!
     }
 
     func testRunningActivityStartingAfterNowCountsAsZero() throws {
@@ -95,13 +90,13 @@ final class DurationTests: XCTestCase {
         let total = 160.0 * 60 + 60
 
         for groupBy in [Store.GroupBy.project, .client, .category, .day] {
-            let summary = try store.summary(in: .instants(range), groupBy: groupBy, calendar: utc, now: now)
+            let summary = try store.summary(in: .instants(range), groupBy: groupBy, now: now)
             XCTAssertEqual(summary.seconds, total, "\(groupBy)")
             XCTAssertEqual(summary.groups.reduce(0) { $0 + $1.seconds }, total, "\(groupBy)")
         }
-        XCTAssertEqual(try store.summary(in: .instants(range), groupBy: .day, calendar: utc, now: now).groups.map(\.seconds),
+        XCTAssertEqual(try store.summary(in: .instants(range), groupBy: .day, now: now).groups.map(\.seconds),
                        [80.0 * 60, 80.0 * 60 + 60])
-        XCTAssertEqual(try store.timesheet(in: .instants(range), calendar: utc, now: now).reduce(0) { $0 + $1.hours }, total / 3600,
+        XCTAssertEqual(try store.timesheet(in: .instants(range), now: now).reduce(0) { $0 + $1.hours }, total / 3600,
                        accuracy: 1e-9)
     }
 }
