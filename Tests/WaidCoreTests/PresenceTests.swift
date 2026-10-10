@@ -41,12 +41,12 @@ final class PresenceTests: XCTestCase {
         XCTAssertEqual(short.map { [$0.start, $0.end!].map { $0.timeIntervalSince(t0) } }, [[0, 1800]],
                        "the full extent, never trimmed")
         XCTAssertEqual(short.map { $0.duration() }, [1200], "only the present time")
-        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .app, now: t0 + 1800),
+        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .app),
                        [Store.EvidenceRow(key: "Xcode", secondsBySource: [Source.window: 1200])])
 
         try threshold(900)
         XCTAssertEqual(try store.activities(in: hour).map { $0.duration() }, [1800], "the pause is bridged")
-        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .app, now: t0 + 1800),
+        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .app),
                        [Store.EvidenceRow(key: "Xcode", secondsBySource: [Source.window: 1800])])
     }
 
@@ -63,7 +63,7 @@ final class PresenceTests: XCTestCase {
         let activities = try store.activities(in: hour)
         XCTAssertEqual(activities.map(\.source), [Source.window, Source.agent("claude-code")])
         XCTAssertEqual(activities.map { $0.duration() }, [1680, 1800], "the agent counts in full, locked or not")
-        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .source, now: t0 + 1800).map(\.secondsBySource),
+        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .source).map(\.secondsBySource),
                        [[Source.agent("claude-code"): 1800], [Source.window: 1680]])
     }
 
@@ -73,7 +73,7 @@ final class PresenceTests: XCTestCase {
         try store.upsertExternal(source: Source.agent("claude-code"), externalID: "s1", start: t0, end: t0 + 3600,
                                  title: "integration", path: "/src/acme")
 
-        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .project, now: t0 + 3600),
+        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .project),
                        [Store.EvidenceRow(key: "Acme / Phase 2", secondsBySource: [Source.agent("claude-code"): 3600])])
         let unlogged = try store.unloggedTime(in: .instants(hour), groupBy: .project, now: t0 + 3600)
         XCTAssertEqual(unlogged.groups, [])

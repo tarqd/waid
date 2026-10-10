@@ -96,8 +96,8 @@ public struct Activity: Codable, Equatable, Sendable {
     public var counted: [DateInterval] = []
 
     /// The time it counts: the sum of `counted`. An open activity counts up
-    /// to its last heartbeat, so `now` changes nothing.
-    public func duration(now: Date = Date()) -> TimeInterval {
+    /// to its last heartbeat.
+    public func duration() -> TimeInterval {
         counted.reduce(0) { $0 + $1.duration }
     }
 

@@ -56,7 +56,7 @@ final class LocalDateTests: XCTestCase {
             XCTAssertEqual(byDay.map(\.key), ["2026-10-06", "2026-10-08"], "\(range)")
             XCTAssertEqual(byDay.map(\.seconds), [2.0 * 3600, 3.0 * 3600], "\(range)")
 
-            let evidence = try store.evidence(in: range, groupBy: .day, now: now)
+            let evidence = try store.evidence(in: range, groupBy: .day)
             XCTAssertEqual(evidence.map(\.key), ["2026-10-06", "2026-10-08", "2026-10-09"], "\(range)")
         }
         // The same dates whatever zone the process runs in.

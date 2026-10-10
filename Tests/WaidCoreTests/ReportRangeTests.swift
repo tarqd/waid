@@ -53,11 +53,11 @@ final class ReportRangeTests: XCTestCase {
             try TimeRange.resolve(range: nil, start: "2026-10-09", end: nil, now: fridayEvening, calendar: newYorkCalendar),
         ] {
             XCTAssertEqual(try store.activities(in: range).map(\.localDate), ["2026-10-09"])
-            let evidence = try store.evidence(in: range, groupBy: .day, now: fridayEvening)
+            let evidence = try store.evidence(in: range, groupBy: .day)
             XCTAssertEqual(evidence.map(\.key), ["2026-10-09"])
             XCTAssertEqual(evidence.map { $0.secondsBySource[Source.window] }, [3600])
         }
-        XCTAssertEqual(try store.evidence(in: dates("2026-10-10"), groupBy: .day, now: fridayEvening).map(\.key),
+        XCTAssertEqual(try store.evidence(in: dates("2026-10-10"), groupBy: .day).map(\.key),
                        ["2026-10-10"])
     }
 
@@ -119,7 +119,7 @@ final class ReportRangeTests: XCTestCase {
 
         // Saturday: 00:00-01:00 in Tokyo, then 00:00-02:00 in New York.
         let saturday = try TimeRange.resolve(range: nil, start: "2026-10-10", end: "2026-10-10", now: now, calendar: newYorkCalendar)
-        let evidence = try store.evidence(in: saturday, groupBy: .day, now: now)
+        let evidence = try store.evidence(in: saturday, groupBy: .day)
         XCTAssertEqual(evidence.map(\.key), ["2026-10-10"])
         XCTAssertEqual(evidence.map { $0.secondsBySource[Source.window] }, [3.0 * 3600])
 

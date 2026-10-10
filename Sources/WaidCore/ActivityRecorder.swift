@@ -145,7 +145,7 @@ public final class ActivityRecorder {
     /// observation at each local midnight it would cross.
     private func extend(_ open: inout Open, to instant: Date, zone: TimeZone) throws {
         try splitAtMidnight(&open, before: instant, zone: zone)
-        try store.setEnd(activityID: open.id, end: instant)
+        try store.setEnd(observationID: open.id, end: instant)
         open.end = instant
     }
 
@@ -154,7 +154,7 @@ public final class ActivityRecorder {
     private func close(_ open: inout Open, at end: Date, zone: TimeZone) throws {
         if end > open.end { try splitAtMidnight(&open, before: end, zone: zone) }
         let end = max(open.start, end)
-        try store.close(activityID: open.id, end: end)
+        try store.close(observationID: open.id, end: end)
         open.end = end
     }
 
@@ -164,7 +164,7 @@ public final class ActivityRecorder {
             let midnight = next.start(in: zone)
             // A zone change can move the date without a midnight in between.
             guard midnight > open.start, midnight <= instant else { return }
-            try store.close(activityID: open.id, end: midnight)
+            try store.close(observationID: open.id, end: midnight)
             open = try begin(open.stream, at: midnight, sample: open.sample, zone: zone)
             open.localDate = next
         }

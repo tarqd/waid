@@ -105,7 +105,7 @@ final class RecorderStreamTests: XCTestCase {
 
         // Evidence counts present time: the 70 s pause is within the idle
         // threshold, and the locked hour is away.
-        let evidence = try store.evidence(in: .instants(DateInterval(start: t0, duration: 7200)), groupBy: .app, now: t0 + 3750)
+        let evidence = try store.evidence(in: .instants(DateInterval(start: t0, duration: 7200)), groupBy: .app)
         XCTAssertEqual(evidence, [Store.EvidenceRow(key: "Xcode", secondsBySource: [Source.window: 142])])
     }
 
@@ -140,7 +140,7 @@ final class RecorderStreamTests: XCTestCase {
         }
         let now = t0 + 3600
         let hour = DateInterval(start: t0, duration: 3600)
-        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .project, now: now),
+        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .project),
                        [Store.EvidenceRow(key: "Acme / Phase 2", secondsBySource: [Source.window: 3000])])
         let drafts = try store.suggestEntries(in: hour, now: now).map(\.entry)
         XCTAssertEqual(drafts.map { [$0.start.timeIntervalSince(t0) / 60, $0.duration() / 60] }, [[0, 30], [40, 20]])

@@ -217,7 +217,7 @@ public enum WaidTools {
                 let unlogged = try store.unloggedTime(in: try named("today"), groupBy: .project, now: now())
                 return Status(
                     now: now(),
-                    current: current.map { ActivityView($0, now: now()) },
+                    current: current.map { ActivityView($0) },
                     runningTimer: try store.runningEntry().map { EntryView($0, now: now()) },
                     unloggedTodayMinutes: minutes(unlogged.seconds),
                     unloggedTodayBillableMinutes: minutes(unlogged.billableSeconds),
@@ -255,7 +255,7 @@ public enum WaidTools {
             ) { a, _ in
                 var f = try activityFilter(a)
                 f.limit = try a.int("limit") ?? 200
-                return try store.activities(in: try range(a), filter: f).map { ActivityView($0, now: now()) }
+                return try store.activities(in: try range(a), filter: f).map { ActivityView($0) }
             },
 
             Tool(
@@ -312,7 +312,7 @@ public enum WaidTools {
                 let totals: EvidenceView.Totals
                 switch try a.string("kind") ?? "activities" {
                 case "activities":
-                    totals = .activities(try store.evidence(in: selection, groupBy: groupBy, filter: try activityFilter(a), now: now()))
+                    totals = .activities(try store.evidence(in: selection, groupBy: groupBy, filter: try activityFilter(a)))
                 case "unlogged":
                     totals = .unlogged(try store.unloggedTime(in: selection, groupBy: groupBy, filter: try activityFilter(a), now: now()))
                 case let kind:
@@ -511,7 +511,7 @@ public enum WaidTools {
                         || (category != nil && activity.assignedCategoryID == nil && engine.categoryRule(for: activity)?.id == rule.id)
                 }
                 return CreatedRule(rule: RuleView(rule, catalog: try store.catalog()), matchedLast30Days: decided.count,
-                                   minutesLast30Days: minutes(decided.reduce(0) { $0 + $1.duration(now: now()) }))
+                                   minutesLast30Days: minutes(decided.reduce(0) { $0 + $1.duration() }))
             },
 
             Tool(
@@ -716,7 +716,7 @@ public enum WaidTools {
                 }
                 let resolved = try store.activities(in: DateInterval(start: start, end: max(end, start + 1)))
                     .first { $0.id == id }
-                return ActivityView(try resolved ?? store.activity(id: id)!, now: now())
+                return ActivityView(try resolved ?? store.activity(id: id)!)
             },
 
             Tool(
@@ -759,8 +759,8 @@ struct ActivityView: Encodable {
     var zone: String
     var localDate: String
 
-    init(_ a: Activity, now: Date) {
-        id = a.id; start = a.start; end = a.end; minutes = WaidTools.minutes(a.duration(now: now))
+    init(_ a: Activity) {
+        id = a.id; start = a.start; end = a.end; minutes = WaidTools.minutes(a.duration())
         source = a.source; app = a.appName; bundleID = a.bundleID; title = a.title; url = a.url; path = a.path
         client = a.client; project = a.project; category = a.category
         projectFrom = a.assignedProjectID != nil ? "assigned" : (a.projectID != nil ? "rule" : nil)

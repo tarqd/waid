@@ -271,7 +271,7 @@ public final class Store {
 
     /// Inserts a focus observation stamped with `zone` (else `processZone`)
     /// and the local date of its start there. With no `end` it is open, its
-    /// end the heartbeat at `start`, until `close(activityID:end:)`; with an
+    /// end the heartbeat at `start`, until `close(observationID:end:)`; with an
     /// `end` it is closed.
     @discardableResult
     public func insertActivity(
@@ -296,6 +296,9 @@ public final class Store {
         _ stream: Observation.Stream, start: Date, end: Date?, source: String, sample: ActivitySample?,
         projectID: Int64?, note: String?, zone: TimeZone?
     ) throws -> Int64 {
+        // Stamped with the zone it was recorded in (ADR-0002), never the
+        // nearest-observation fallback `stamp` takes for a nil zone: these
+        // rows are what that fallback reads.
         let stamped = try stamp(start: start, zone: zone ?? processZone)
         try db.run(
             """
@@ -324,13 +327,13 @@ public final class Store {
     }
 
     /// Moves an open observation's heartbeat. A closed one can't be changed.
-    public func setEnd(activityID: Int64, end: Date) throws {
-        try db.run("UPDATE observations SET end_ts = ? WHERE id = ?", [end, activityID])
+    public func setEnd(observationID: Int64, end: Date) throws {
+        try db.run("UPDATE observations SET end_ts = ? WHERE id = ?", [end, observationID])
     }
 
     /// Closes an open observation at `end`; after this its time is fixed.
-    public func close(activityID: Int64, end: Date) throws {
-        try db.run("UPDATE observations SET end_ts = ?, open = 0 WHERE id = ? AND open = 1", [end, activityID])
+    public func close(observationID: Int64, end: Date) throws {
+        try db.run("UPDATE observations SET end_ts = ?, open = 0 WHERE id = ? AND open = 1", [end, observationID])
     }
 
     /// Closes every observation still open at its last heartbeat, as after a
@@ -494,7 +497,7 @@ public final class Store {
     /// Evidence: activity totals per source, to help write time entries.
     /// Observed time, never claimed time, so never summed across sources.
     public func evidence(
-        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(), now: Date = Date()
+        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter()
     ) throws -> [EvidenceRow] {
         struct Key: Hashable { var key: String; var source: String }
         var tally = TimeAccounting.Tally<Key>()
