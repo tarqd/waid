@@ -292,8 +292,10 @@ final class MCPServerTests: XCTestCase {
     }
 
     func testRangesAreLocalDatesWhereYouAre() throws {
-        // now is Saturday 00:00 in Tokyo, still Friday in UTC.
-        try store.recordZone(TimeZone(identifier: "Asia/Tokyo")!, now: now - 7 * 86400)
+        // now is Saturday 00:00 in Tokyo, still Friday in UTC; the daemon last recorded you in Tokyo.
+        store.processZone = TimeZone(identifier: "America/New_York")!
+        try store.insertActivity(start: now - 7 * 86400, end: now - 7 * 86400 + 60, source: Source.window,
+                                 zone: TimeZone(identifier: "Asia/Tokyo")!)
         let acme = try store.ensureProject("Acme / Phase 2")
         for start in [now - 3600, now] {
             try store.createEntry(NewTimeEntry(start: start, end: start + 1800, projectID: acme.id, origin: .manual), now: now)
@@ -301,10 +303,13 @@ final class MCPServerTests: XCTestCase {
 
         let today = try call("summarize", ["range": "today", "group_by": "day"])
         XCTAssertEqual(today["groups"], [["key": "2026-10-10", "minutes": 30, "billable_minutes": 30]])
+        XCTAssertEqual(today["start"], "2026-10-10", "a date range is echoed as its local dates")
+        XCTAssertEqual(today["end"], "2026-10-10")
         let friday = try call("summarize", ["start": "2026-10-09", "end": "2026-10-09", "group_by": "day"])
         XCTAssertEqual(friday["groups"], [["key": "2026-10-09", "minutes": 30, "billable_minutes": 30]])
         let instants = try call("summarize", ["start": "2026-10-09T14:15:00Z", "end": "2026-10-09T15:15:00Z", "group_by": "day"])
         XCTAssertEqual(instants["total_minutes"], 30)
+        XCTAssertEqual(instants["start"], "2026-10-09T14:15:00Z")
     }
 
     func testFiguresAreRoundedOnceAndTotalsComeFromSeconds() throws {

@@ -71,7 +71,7 @@ Or in any MCP client config:
 
 Entries an agent writes record it as the author (`agent:claude-code`), so you can see and undo them.
 
-Ranges are local dates where you were, per the zone history (weeks start Monday); timestamps with a time of day are exact instants.
+Ranges are local dates, matched against the date stored on each activity and entry where it happened (weeks start Monday); timestamps with a time of day are exact instants. A date range is echoed back as `start` and `end` dates, both inclusive.
 
 **Breaking change:** `summarize` used to default to activity totals and took a `kind`. It now reports time entries only (a Summary); activity totals and Unlogged time moved to the `evidence` tool. Likewise `waid report` now shows the Summary by default, with `--evidence` and `--unlogged` for the others (`--entries` is gone). `suggest_time_entries` returns each draft's top titles and apps as `contributors` (formerly `evidence`), since Evidence now names activity totals.
 

@@ -39,6 +39,15 @@ public final class Store {
         return row?.string("zone").flatMap(TimeZone.init(identifier:)) ?? fallback
     }
 
+    /// `calendar` set to the zone you are in at `now` (`zone(at:fallback:)`,
+    /// falling back to the process zone), for resolving "today" and the other
+    /// named ranges, and datetimes without an offset.
+    public func calendar(at now: Date, fallback calendar: Calendar = .current) throws -> Calendar {
+        var calendar = calendar
+        calendar.timeZone = try zone(at: now, fallback: processZone)
+        return calendar
+    }
+
     /// The zone a new row is stamped with, and the local dates of its first
     /// and last instants there (see `localDates(start:end:in:)`): `zone` if
     /// given, else the zone at its start (`zone(at:fallback:)`), falling back
@@ -202,15 +211,6 @@ public final class Store {
             CHECK ((end_ts IS NULL) = (end_date IS NULL))
         ) STRICT;
         CREATE INDEX time_entries_start ON time_entries(start_ts);
-
-        -- Zone history (ADR-0001), superseded by ADR-0002; still read for
-        -- range selection until stored local dates replace it.
-        CREATE TABLE zone_history(
-            id INTEGER PRIMARY KEY,
-            zone TEXT NOT NULL,
-            effective_ts REAL NOT NULL
-        ) STRICT;
-        CREATE INDEX zone_history_effective ON zone_history(effective_ts);
 
         -- Bookkeeping and settings.
         CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
@@ -418,8 +418,26 @@ public final class Store {
 
     /// Spans overlapping `range`, with project, category and client resolved.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter()) throws -> [Activity] {
-        var sql = "SELECT * FROM observations WHERE stream = 'focus' AND start_ts < ? AND end_ts > ?"
-        var params: [SQLBindable] = [range.end, range.start]
+        try activities(where: "start_ts < ? AND end_ts > ?", [range.end, range.start], filter: filter)
+    }
+
+    /// Spans `range` selects, oldest first, with project, category and
+    /// client resolved: those stamped with one of its local dates, or those
+    /// overlapping its instants.
+    public func activities(
+        in range: ReportRange, filter: ActivityFilter = ActivityFilter()
+    ) throws -> [Activity] {
+        switch range {
+        case .instants(let interval): return try activities(in: interval, filter: filter)
+        case .localDates(let dates):
+            return try activities(where: "local_date BETWEEN ? AND ?",
+                                  [dates.lowerBound.description, dates.upperBound.description], filter: filter)
+        }
+    }
+
+    private func activities(where condition: String, _ conditionParams: [SQLBindable], filter: ActivityFilter) throws -> [Activity] {
+        var sql = "SELECT * FROM observations WHERE stream = 'focus' AND \(condition)"
+        var params = conditionParams
         if !filter.includeHidden { sql += " AND hidden = 0" }
         if let sources = filter.sources, !sources.isEmpty {
             sql += " AND source IN (" + sources.map { _ in "?" }.joined(separator: ",") + ")"
@@ -445,26 +463,6 @@ public final class Store {
             if let limit = filter.limit, result.count >= limit { break }
         }
         return result
-    }
-
-    /// Spans with time on `range`'s local dates (or in its instants), oldest
-    /// first, with project, category and client resolved. When a local date
-    /// repeats, spans in the gap between its stretches are left out.
-    public func activities(
-        in range: ReportRange, filter: ActivityFilter = ActivityFilter(), calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [Activity] {
-        try activities(overlapping: try intervals(range, calendar: calendar), filter: filter, now: now)
-    }
-
-    /// Spans overlapping any of `intervals`, oldest first.
-    func activities(overlapping intervals: [DateInterval], filter: ActivityFilter, now: Date) throws -> [Activity] {
-        guard let hull = TimeAccounting.hull(intervals) else { return [] }
-        var unlimited = filter
-        unlimited.limit = nil
-        let spans = try activities(in: hull, filter: unlimited).filter {
-            TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
-        }
-        return filter.limit.map { Array(spans.prefix($0)) } ?? spans
     }
 
     private static func activity(_ row: Row) -> Activity {
@@ -495,18 +493,17 @@ public final class Store {
     /// Evidence: activity totals per source, to help write time entries.
     /// Observed time, never claimed time, so never summed across sources.
     public func evidence(
-        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
-        calendar: Calendar = .current, now: Date = Date()
+        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(), now: Date = Date()
     ) throws -> [EvidenceRow] {
         struct Key: Hashable { var key: String; var source: String }
-        let dates = try localDates(fallback: calendar)
-        let intervals = dates.intervals(range)
         var tally = TimeAccounting.Tally<Key>()
-        for activity in try activities(overlapping: intervals, filter: filter, now: now) {
+        for activity in try activities(in: range, filter: filter) {
             let keys = TimeAccounting.GroupKeys(project: activity.project, client: activity.client,
                                                 category: activity.category, app: activity.appName, source: activity.source)
-            for clipped in TimeAccounting.clip(start: activity.start, end: activity.end, to: intervals, now: now) {
-                tally.add(clipped, groupBy: groupBy, keys: keys, dates: dates) { Key(key: $0, source: activity.source) }
+            guard let counted = TimeAccounting.counted(start: activity.start, end: activity.end, in: range, now: now)
+            else { continue }
+            tally.add(counted.duration, day: activity.localDate, groupBy: groupBy, keys: keys) {
+                Key(key: $0, source: activity.source)
             }
         }
         var rows: [String: [String: Double]] = [:]

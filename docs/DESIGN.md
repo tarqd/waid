@@ -74,7 +74,6 @@ time_entries  id, start_ts, end_ts (NULL = running timer),       -- CLAIMED: edi
               author (user | agent:<client>),
               status (draft | confirmed)
 
-zone_history  id, zone, effective_ts                             -- ADR-0001; still read for ranges, going away
 kv            key, value                                         -- bookkeeping and settings, e.g. importer last run,
                                                                  -- idle_threshold_seconds (default 180)
 ```
@@ -98,7 +97,7 @@ Two professional-services **Reports** sit on top of Summaries:
 - **Budget status**: confirmed hours against `budget_hours` per engagement, plus unconfirmed drafts, remaining hours and burn.
 - **Timesheet**: one row per day × project × category, with entry titles and notes as the billing narrative, exportable as CSV.
 
-Days in every report are **local dates**: the date where you were when the time happened, from the zone history waid records as you travel, not the zone the report runs in. A span crossing a zone change or local midnight is split, and each piece lands on its own local date. See `GLOSSARY.md` (Zone history, Local date) and [ADR-0001](adr/0001-zone-history.md). Ranges agree with those day labels: named ranges (`today`, `this_week`, …) and date-only inputs select spans by local date, and weeks start on Monday whatever the locale. Explicit RFC 3339 timestamps select exact instants.
+Days in every report are **local dates**: the date where the time happened, stored on each row in its own zone (ADR-0002), not the zone the report runs in, so a Tuesday in Tokyo stays Tuesday from anywhere. An observation has exactly one local date, its `local_date`, since the recorder closes and reopens at local midnight. A time entry keeps its `start_date` and `end_date`, and day grouping splits it at the midnights of its own zone: a 23:00 to 01:00 entry is one entry and two timesheet rows. Ranges agree with those day labels: named ranges (`today`, `this_week`, …) and date-only inputs select observations by `local_date` and time entries whose dates overlap the range's (a running entry is open-ended); weeks start on Monday whatever the locale. Explicit RFC 3339 timestamps select exact instants, and each piece is still labelled with its stored date. "Today" is the date now in the zone of the latest observation, else the process zone. See `GLOSSARY.md` (Local date). Suggestions and Unlogged time lay their buckets over each selected date's instants in the zones its activities were stamped with.
 
 ### Suggesting entries
 

@@ -49,7 +49,7 @@ public enum WaidTools {
         let rangeProps: [String: JSONValue] = [
             "range": ["type": "string", "enum": .array(TimeRange.names.map { .string($0) }),
                       "description": """
-                        Named range of local dates (the date where you were, per the zone history); weeks start Monday. \
+                        Named range of local dates, matched against the date each activity and entry is stamped with where it happened; weeks start Monday. \
                         Takes precedence over start/end. Defaults to today.
                         """],
             "start": ["type": "string", "description": "ISO 8601 date (selects by local date) or datetime (an exact instant, inclusive)."],
@@ -238,7 +238,7 @@ public enum WaidTools {
             ) { a, _ in
                 var f = try activityFilter(a)
                 f.limit = try a.int("limit") ?? 200
-                return try store.activities(in: try range(a), filter: f, now: now()).map { ActivityView($0, now: now()) }
+                return try store.activities(in: try range(a), filter: f).map { ActivityView($0, now: now()) }
             },
 
             Tool(
@@ -264,7 +264,7 @@ public enum WaidTools {
                 let selection = try range(a)
                 let summary = try store.summary(in: selection, groupBy: groupBy, filter: try entryFilter(a),
                                                 includeDrafts: try a.bool("include_drafts") ?? false, now: now())
-                return SummaryView(bounds: try store.bounds(of: selection), groupBy: groupBy.rawValue, summary: summary)
+                return SummaryView(range: selection, groupBy: groupBy.rawValue, summary: summary)
             },
 
             Tool(
@@ -301,7 +301,7 @@ public enum WaidTools {
                 case let kind:
                     throw ToolError("unknown kind \"\(kind)\"; use activities or unlogged (time entries are in summarize)")
                 }
-                return EvidenceView(bounds: try store.bounds(of: selection), groupBy: groupBy.rawValue, totals: totals)
+                return EvidenceView(range: selection, groupBy: groupBy.rawValue, totals: totals)
             },
 
             Tool(
@@ -315,7 +315,7 @@ public enum WaidTools {
                 var f = Store.ActivityFilter()
                 f.uncategorizedOnly = true
                 var groups: [String: UncategorizedGroup] = [:]
-                for activity in try store.activities(in: try range(a), filter: f, now: now()) {
+                for activity in try store.activities(in: try range(a), filter: f) {
                     let (field, value): (String, String)
                     if let host = activity.url.flatMap({ URL(string: $0)?.host }) {
                         (field, value) = ("url", host)
@@ -485,7 +485,7 @@ public enum WaidTools {
                 guard let op = RuleOp(rawValue: opName) else { throw ToolError("unknown op \"\(opName)\"") }
                 let rule = try store.addRule(projectID: project, categoryID: category, field: field, op: op,
                                              pattern: try a.requiredString("pattern"), priority: try a.int("priority") ?? 0)
-                let recent = try store.activities(in: try named("last_30_days"), now: now())
+                let recent = try store.activities(in: try named("last_30_days"))
                 let engine = RuleEngine(rules: try store.rules())
                 let decided = recent.filter { activity in
                     (project != nil && activity.assignedProjectID == nil && engine.projectRule(for: activity)?.id == rule.id)
@@ -817,10 +817,26 @@ struct TimeGroupView: Encodable {
 }
 
 /// A Summary: claimed time from time entries.
+/// The range a report covers, echoed back as `start` and `end`: its first and
+/// last local dates ("yyyy-MM-dd", both inclusive), or its instants (end
+/// exclusive), as the caller gave it.
+struct RangeView {
+    var range: ReportRange
+
+    func encode<Key: CodingKey>(into c: inout KeyedEncodingContainer<Key>, start: Key, end: Key) throws {
+        switch range {
+        case .localDates(let dates):
+            try c.encode(dates.lowerBound.description, forKey: start)
+            try c.encode(dates.upperBound.description, forKey: end)
+        case .instants(let interval):
+            try c.encode(interval.start, forKey: start)
+            try c.encode(interval.end, forKey: end)
+        }
+    }
+}
+
 struct SummaryView: Encodable {
-    /// The range's first and last instants; nil when it covers none.
-    var start: Date?
-    var end: Date?
+    var range: RangeView
     var groupBy: String
     var groups: [TimeGroupView]
     var totalMinutes: Double
@@ -828,12 +844,22 @@ struct SummaryView: Encodable {
     /// Billable / total, or nil with no time.
     var utilization: Double?
 
-    init(bounds: DateInterval?, groupBy: String, summary: Store.Summary) {
-        start = bounds?.start; end = bounds?.end; self.groupBy = groupBy
+    init(range: ReportRange, groupBy: String, summary: Store.Summary) {
+        self.range = RangeView(range: range); self.groupBy = groupBy
         groups = summary.groups.map(TimeGroupView.init)
         totalMinutes = WaidTools.minutes(summary.seconds)
         billableMinutes = WaidTools.minutes(summary.billableSeconds)
         utilization = summary.utilization.map { ($0 * 1000).rounded() / 1000 }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try range.encode(into: &c, start: .start, end: .end)
+        try c.encode(groupBy, forKey: .groupBy)
+        try c.encode(groups, forKey: .groups)
+        try c.encode(totalMinutes, forKey: .totalMinutes)
+        try c.encode(billableMinutes, forKey: .billableMinutes)
+        try c.encodeIfPresent(utilization, forKey: .utilization)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -856,15 +882,13 @@ struct EvidenceView: Encodable {
         enum CodingKeys: String, CodingKey { case key, minutesBySource = "minutes_by_source" }
     }
 
-    /// The range's first and last instants; nil when it covers none.
-    var bounds: DateInterval?
+    var range: ReportRange
     var groupBy: String
     var totals: Totals
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encodeIfPresent(bounds?.start, forKey: .start)
-        try c.encodeIfPresent(bounds?.end, forKey: .end)
+        try RangeView(range: range).encode(into: &c, start: .start, end: .end)
         try c.encode(groupBy, forKey: .groupBy)
         switch totals {
         case .activities(let rows):
