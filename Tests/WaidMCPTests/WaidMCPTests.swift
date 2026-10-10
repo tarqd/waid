@@ -217,4 +217,81 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(csv.stringValue?.split(separator: "\n").dropFirst().map { $0.split(separator: ",")[4] },
                        ["0.34", "0.34", "0.34"])
     }
+
+    private func keys(_ result: JSONValue) -> [String] {
+        guard case .array(let groups)? = result["groups"] else { return [] }
+        return groups.compactMap { $0["key"]?.stringValue }
+    }
+
+    func testFiltersAndGroupBysWorkOrSayWhyNot() throws {
+        let t = TimeRange.parseDate("2026-10-09T09:00:00Z")!
+        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode", title: "acme code"))
+        try store.insertActivity(start: t + 3600, end: t + 5400, source: Source.window,
+                                 sample: ActivitySample(appName: "Safari", title: "beta docs"))
+        _ = try call("create_project", ["name": "Phase 2", "client": "Acme"])
+        _ = try call("create_project", ["name": "Rollout", "client": "Beta"])
+        _ = try call("create_rule", ["project": "Acme / Phase 2", "field": "app_name", "op": "equals", "pattern": "Xcode"])
+        _ = try call("create_rule", ["project": "Beta / Rollout", "field": "app_name", "op": "equals", "pattern": "Safari"])
+
+        // Unlogged time honours project and client by the bucket's label.
+        let acmeOnly = try call("evidence", ["kind": "unlogged", "client": "Acme"])
+        XCTAssertEqual(acmeOnly["groups"], [["key": "Acme / Phase 2", "minutes": 60]])
+        XCTAssertEqual(try call("evidence", ["kind": "unlogged", "project": "Beta / Rollout"])["total_minutes"], 30)
+
+        // ...and rejects text and sources by name.
+        let text = try call("evidence", ["kind": "unlogged", "text": "acme"], expectError: true)
+        XCTAssertTrue(text.stringValue?.contains("text") == true, "\(text)")
+        let sources = try call("evidence", ["kind": "unlogged", "sources": ["window"]], expectError: true)
+        XCTAssertTrue(sources.stringValue?.contains("sources") == true, "\(sources)")
+
+        // Evidence of activities honours text and sources.
+        XCTAssertEqual(keys(try call("evidence", ["text": "beta"])), ["Beta / Rollout"])
+        XCTAssertEqual(keys(try call("evidence", ["sources": ["agent:codex"]])), [])
+
+        // Time entries have no sources: summarize and timesheet say so.
+        for tool in ["summarize", "timesheet"] {
+            let error = try call(tool, ["sources": ["window"]], expectError: true)
+            XCTAssertTrue(error.stringValue?.contains("sources") == true, "\(tool): \(error)")
+        }
+
+        // Group-bys that don't apply to time entries or Unlogged time are errors naming them.
+        for groupBy in ["app", "source"] {
+            let summary = try call("summarize", ["group_by": .string(groupBy)], expectError: true)
+            XCTAssertTrue(summary.stringValue?.contains(groupBy) == true, "\(summary)")
+            let unlogged = try call("evidence", ["kind": "unlogged", "group_by": .string(groupBy)], expectError: true)
+            XCTAssertTrue(unlogged.stringValue?.contains(groupBy) == true, "\(unlogged)")
+        }
+
+        // Entry text matches title and notes, not tags; summarize and the timesheet honour status.
+        _ = try call("create_time_entry", ["start": "2026-10-09T09:00:00Z", "end": "2026-10-09T10:00:00Z",
+                                           "project": "Acme / Phase 2", "notes": "wrote the integration"])
+        _ = try call("create_time_entry", ["start": "2026-10-09T10:00:00Z", "end": "2026-10-09T10:30:00Z",
+                                           "project": "Beta / Rollout", "title": "docs", "tags": ["integration"]])
+        _ = try call("create_time_entry", ["start": "2026-10-09T11:00:00Z", "end": "2026-10-09T11:15:00Z",
+                                           "project": "Beta / Rollout", "title": "draft docs", "status": "draft"])
+        let integration = try call("summarize", ["text": "integration"])
+        XCTAssertEqual(keys(integration), ["Acme / Phase 2"])
+        XCTAssertEqual(integration["total_minutes"], 60)
+        XCTAssertEqual(try call("summarize", ["status": "draft"])["total_minutes"], 15)
+        XCTAssertEqual(try call("timesheet", ["status": "draft"]),
+                       [["date": "2026-10-09", "client": "Beta", "project": "Beta / Rollout",
+                         "hours": .number(0.25), "billable_hours": .number(0.25), "notes": ["draft docs"]]])
+        guard case .array(let confirmed) = try call("timesheet", ["status": "confirmed", "include_drafts": true]) else {
+            return XCTFail("timesheet")
+        }
+        XCTAssertEqual(confirmed.count, 2)
+
+        // Tool descriptions say what text matches.
+        let list = try send(#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#)
+        guard case .array(let tools)? = list["result"]?["tools"] else { return XCTFail("no tools") }
+        func textDescription(_ name: String) -> String? {
+            tools.first { $0["name"] == .string(name) }?["inputSchema"]?["properties"]?["text"]?["description"]?.stringValue
+        }
+        for name in ["summarize", "timesheet", "query_time_entries"] {
+            XCTAssertEqual(textDescription(name), "Substring match on entry title or notes.", name)
+        }
+        XCTAssertTrue(textDescription("evidence")?.contains("title, app, URL, path or note") == true)
+        XCTAssertTrue(textDescription("evidence")?.contains("not unlogged") == true)
+    }
 }

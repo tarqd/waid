@@ -61,6 +61,11 @@ public enum WaidTools {
                         "description": "Only these sources, e.g. [\"window\"] or [\"agent:claude-code\"]."],
             "text": ["type": "string", "description": "Substring match on title, app, URL, path or note."],
         ]) { $1 }
+        /// Time entry filters: no sources, since entries aren't observed.
+        let entryFilterProps = attributionFilterProps.merging([
+            "text": ["type": "string", "description": "Substring match on entry title or notes."],
+            "status": ["type": "string", "enum": ["draft", "confirmed"]],
+        ]) { $1 }
         let suggestProps: [String: JSONValue] = [
             "merge_gap_minutes": ["type": "integer", "description": "Merge same project+category blocks this close, absorbing interruptions (default 5)."],
             "min_minutes": ["type": "integer", "description": "Shortest block worth an entry (default 10)."],
@@ -145,6 +150,12 @@ public enum WaidTools {
             f.text = try a.string("text")
             return f
         }
+        /// Time entries have no source; a sources filter would silently match everything.
+        func rejectSources(_ a: Arguments) throws {
+            if a.has("sources") {
+                throw ToolError("time entries can't be filtered by sources; sources apply to activities (evidence kind=activities)")
+            }
+        }
         func suggester(_ a: Arguments) throws -> EntrySuggester {
             var s = EntrySuggester()
             if let m = try a.int("merge_gap_minutes") { s.mergeGap = TimeInterval(max(0, m) * 60) }
@@ -214,10 +225,10 @@ public enum WaidTools {
                 description: """
                     Summary: claimed time from time entries in a range, with billable minutes and utilization \
                     (billable / total). Confirmed entries only unless include_drafts. group_by project, client, \
-                    category or day. Observed activity is not here: use the evidence tool for that.
+                    category or day. A status filter, when given, replaces the confirmed-only default. Observed \
+                    activity is not here: use the evidence tool for that.
                     """,
-                inputSchema: schema(rangeProps.merging(attributionFilterProps) { $1 }.merging([
-                    "text": ["type": "string", "description": "Substring match on entry title or notes."],
+                inputSchema: schema(rangeProps.merging(entryFilterProps) { $1 }.merging([
                     "group_by": ["type": "string", "enum": ["project", "client", "category", "day"],
                                  "description": "Default: project."],
                     "include_drafts": ["type": "boolean", "description": "Count draft entries too (default false)."],
@@ -227,10 +238,10 @@ public enum WaidTools {
                 if a.has("kind") {
                     throw ToolError("summarize reports time entries only and takes no kind; use the evidence tool for activities or unlogged time")
                 }
+                try rejectSources(a)
                 let groupBy = try groupBy(a)
                 let interval = try range(a)
-                var f = try entryFilter(a)
-                f.status = nil
+                let f = try entryFilter(a)
                 let summary = try store.summary(in: interval, groupBy: groupBy, filter: f,
                                                 includeDrafts: try a.bool("include_drafts") ?? false, now: now())
                 return SummaryView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, summary: summary)
@@ -243,10 +254,15 @@ public enum WaidTools {
                     kind=activities (default): observed activity time in minutes per source (window, agent:*), never \
                     summed across sources; group_by project, client, category, app, source or day. \
                     kind=unlogged: work a suggestion would offer to claim (stretches where one project dominates, \
-                    agents excluded) not covered by a confirmed time entry; group_by project, client, category or day. \
-                    For claimed time use summarize.
+                    agents excluded) not covered by a confirmed time entry; group_by project, client, category or day; \
+                    project, client and category filters match the stretch's project and category; text and sources \
+                    don't apply. For claimed time use summarize.
                     """,
                 inputSchema: schema(rangeProps.merging(activityFilterProps) { $1 }.merging([
+                    "sources": ["type": "array", "items": ["type": "string"],
+                                "description": "Activities only, not unlogged: only these sources, e.g. [\"window\"] or [\"agent:claude-code\"]."],
+                    "text": ["type": "string",
+                             "description": "Activities only, not unlogged: substring match on title, app, URL, path or note."],
                     "kind": ["type": "string", "enum": ["activities", "unlogged"], "description": "Default: activities."],
                     "group_by": ["type": "string", "enum": .array(Store.GroupBy.allCases.map { .string($0.rawValue) }),
                                  "description": "Default: project."],
@@ -260,7 +276,7 @@ public enum WaidTools {
                     let rows = try store.evidence(in: interval, groupBy: groupBy, filter: try activityFilter(a), now: now())
                     return EvidenceTotalsView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, activities: rows)
                 case "unlogged":
-                    let unlogged = try store.unloggedTime(in: interval, groupBy: groupBy, now: now())
+                    let unlogged = try store.unloggedTime(in: interval, groupBy: groupBy, filter: try activityFilter(a), now: now())
                     return EvidenceTotalsView(start: interval.start, end: interval.end, groupBy: groupBy.rawValue, unlogged: unlogged)
                 case let kind:
                     throw ToolError("unknown kind \"\(kind)\"; use activities or unlogged (time entries are in summarize)")
@@ -473,13 +489,13 @@ public enum WaidTools {
             Tool(
                 name: "query_time_entries",
                 description: "List time entries in a range, oldest first.",
-                inputSchema: schema(rangeProps.merging(attributionFilterProps) { $1 }.merging([
+                inputSchema: schema(rangeProps.merging(entryFilterProps) { $1 }.merging([
                     "status": ["type": "string", "enum": ["draft", "confirmed"], "description": "Default: both."],
-                    "text": ["type": "string", "description": "Substring match on title, notes or tags."],
                 ]) { $1 }),
                 readOnly: true
             ) { a, _ in
-                try store.timeEntries(in: try range(a), filter: try entryFilter(a), now: now()).map { EntryView($0, now: now()) }
+                try rejectSources(a)
+                return try store.timeEntries(in: try range(a), filter: try entryFilter(a), now: now()).map { EntryView($0, now: now()) }
             },
 
             Tool(
@@ -611,15 +627,15 @@ public enum WaidTools {
 
             Tool(
                 name: "timesheet",
-                description: "Confirmed time as one row per day, project and category, with hours, billable hours and the entries' titles/notes as the narrative. format=csv returns CSV ready to import into a PSA/timesheet tool.",
-                inputSchema: schema(rangeProps.merging(attributionFilterProps) { $1 }.merging([
+                description: "Confirmed time as one row per day, project and category, with hours, billable hours and the entries' titles/notes as the narrative. A status filter, when given, replaces the confirmed-only default. format=csv returns CSV ready to import into a PSA/timesheet tool.",
+                inputSchema: schema(rangeProps.merging(entryFilterProps) { $1 }.merging([
                     "include_drafts": ["type": "boolean", "description": "Include unconfirmed drafts (default false)."],
                     "format": ["type": "string", "enum": ["json", "csv"]],
                 ]) { $1 }),
                 readOnly: true
             ) { a, _ in
-                var f = try entryFilter(a)
-                f.status = nil
+                try rejectSources(a)
+                let f = try entryFilter(a)
                 let rows = try store.timesheet(in: try range(a), filter: f, includeDrafts: try a.bool("include_drafts") ?? false, now: now())
                 if try a.string("format") == "csv" { return Store.csv(rows) }
                 return rows.map(TimesheetView.init)
