@@ -106,6 +106,8 @@ public final class Store {
         CREATE INDEX observations_local_date ON observations(local_date);
         CREATE UNIQUE INDEX observations_external ON observations(source, external_id)
             WHERE external_id IS NOT NULL;
+        -- At most one observation per stream and source is still being recorded.
+        CREATE UNIQUE INDEX observations_open ON observations(stream, source) WHERE open = 1;
 
         -- No two observations of one stream and source overlap. Imported
         -- agent segments may overlap each other: sessions run in parallel.
@@ -127,6 +129,21 @@ public final class Store {
               AND (o.external_id IS NULL OR NEW.external_id IS NULL))
         BEGIN
             SELECT RAISE(ABORT, 'observation overlaps another in the same stream and source');
+        END;
+
+        -- A closed observation is evidence: its time, identity and payload
+        -- are fixed, though overrides and meta stay editable. Imported rows
+        -- (with an external_id) stay upsertable.
+        CREATE TRIGGER observations_closed_fixed BEFORE UPDATE ON observations
+        WHEN OLD.open = 0 AND OLD.external_id IS NULL AND (
+            NEW.open IS NOT OLD.open OR NEW.external_id IS NOT OLD.external_id
+            OR NEW.start_ts IS NOT OLD.start_ts OR NEW.end_ts IS NOT OLD.end_ts
+            OR NEW.stream IS NOT OLD.stream OR NEW.source IS NOT OLD.source
+            OR NEW.zone IS NOT OLD.zone OR NEW.local_date IS NOT OLD.local_date
+            OR NEW.bundle_id IS NOT OLD.bundle_id OR NEW.app_name IS NOT OLD.app_name
+            OR NEW.title IS NOT OLD.title OR NEW.url IS NOT OLD.url OR NEW.path IS NOT OLD.path)
+        BEGIN
+            SELECT RAISE(ABORT, 'a closed observation''s time, identity and payload can''t change');
         END;
 
         -- Claimed time. zone is where it happened; start_date and end_date
