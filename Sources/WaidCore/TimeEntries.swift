@@ -89,17 +89,16 @@ extension Store {
     func insertEntry(_ new: NewTimeEntry, now: Date) throws -> TimeEntry {
         try validate(start: new.start, end: new.end, excluding: nil, now: now)
         let billable = try new.billable ?? catalog().defaultBillable(projectID: new.projectID, categoryID: new.categoryID)
-        // The process zone for now; the rest of ADR-0002's fallback chain comes later.
-        let zone = processZone
-        let dates = Self.localDates(start: new.start, end: new.end, in: zone)
+        let stamped = stamp(start: new.start, end: new.end, zone: nil)
         try db.run(
             """
             INSERT INTO time_entries(start_ts, end_ts, zone, start_date, end_date, project_id, category_id, title, notes,
                                      tags, billable, origin, author, status, created_ts, updated_ts)
             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [new.start, new.end, zone.identifier, dates.start, dates.end, new.projectID, new.categoryID, new.title,
-             new.notes, Self.encodeTags(new.tags), billable, new.origin.rawValue, new.author, new.status.rawValue, now, now])
+            [new.start, new.end, stamped.zone.identifier, stamped.startDate, stamped.endDate, new.projectID,
+             new.categoryID, new.title, new.notes, Self.encodeTags(new.tags), billable, new.origin.rawValue,
+             new.author, new.status.rawValue, now, now])
         return try requireTimeEntry(id: db.lastInsertRowID)
     }
 

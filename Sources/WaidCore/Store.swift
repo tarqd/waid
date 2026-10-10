@@ -26,6 +26,16 @@ public final class Store {
     }
     private var fixedZone: TimeZone?
 
+    /// The zone a new row is stamped with, and the local dates of its first
+    /// and last instants there (see `localDates(start:end:in:)`). Today that
+    /// is `zone`, else `processZone`; ADR-0002's fallback chain (the zone of
+    /// the nearest earlier observation) belongs here.
+    func stamp(start: Date, end: Date? = nil, zone: TimeZone?) -> (zone: TimeZone, startDate: String, endDate: String?) {
+        let zone = zone ?? processZone
+        let dates = Self.localDates(start: start, end: end, in: zone)
+        return (zone, dates.start, dates.end)
+    }
+
     /// The schema version a database created by `schema` carries. Earlier
     /// versions came from the migration history before observations, which
     /// waid never shipped and does not migrate.
@@ -244,22 +254,23 @@ public final class Store {
 
     // MARK: Activities
 
-    /// Inserts a focus observation stamped with `zone` (else `processZone`) and the local date of
-    /// its start there. With no `end` it is open, its end the heartbeat at
-    /// `start`, until `close(activityID:end:)`; with an `end` it is closed.
+    /// Inserts a focus observation stamped with `zone` (else `processZone`)
+    /// and the local date of its start there. With no `end` it is open, its
+    /// end the heartbeat at `start`, until `close(activityID:end:)`; with an
+    /// `end` it is closed.
     @discardableResult
     public func insertActivity(
         start: Date, end: Date?, source: String, sample: ActivitySample = ActivitySample(),
         projectID: Int64? = nil, note: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
-        let zone = zone ?? processZone
+        let stamped = stamp(start: start, zone: zone)
         try db.run(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, open, zone, local_date,
                                      bundle_id, app_name, title, url, path, project_id, note)
             VALUES('focus', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [source, start, end ?? start, end == nil, zone.identifier, LocalDate(start, in: zone).description,
+            [source, start, end ?? start, end == nil, stamped.zone.identifier, stamped.startDate,
              sample.bundleID, sample.appName, sample.title, sample.url, sample.path, projectID, note])
         return db.lastInsertRowID
     }
@@ -289,7 +300,7 @@ public final class Store {
         source: String, externalID: String, start: Date, end: Date,
         title: String?, path: String?, meta: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
-        let zone = zone ?? processZone
+        let stamped = stamp(start: start, zone: zone)
         let row = try db.query(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, zone, local_date, external_id, title, path, meta)
@@ -300,7 +311,7 @@ public final class Store {
                 title = excluded.title, path = excluded.path, meta = excluded.meta
             RETURNING id
             """,
-            [source, start, end, zone.identifier, LocalDate(start, in: zone).description, externalID, title, path, meta])
+            [source, start, end, stamped.zone.identifier, stamped.startDate, externalID, title, path, meta])
         return row[0].int("id")!
     }
 
