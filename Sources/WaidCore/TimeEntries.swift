@@ -16,8 +16,16 @@ extension Store {
         public var projectID: Int64?
         public var clientID: Int64?
         public var categoryID: Int64?
+        /// Substring match on title or notes.
         public var text: String?
         public init() {}
+
+        /// Confirmed entries only, unless a status is asked for or drafts are included.
+        func counting(drafts includeDrafts: Bool) -> EntryFilter {
+            var filter = self
+            if !includeDrafts && filter.status == nil { filter.status = .confirmed }
+            return filter
+        }
     }
 
     /// Entries overlapping `range`, oldest first.
@@ -41,8 +49,8 @@ extension Store {
             params.append(categoryID)
         }
         if let text = filter.text, !text.isEmpty {
-            sql += " AND (title LIKE ? OR notes LIKE ? OR tags LIKE ?)"
-            params += Array(repeating: "%\(text)%" as SQLBindable, count: 3)
+            sql += " AND (title LIKE ? OR notes LIKE ?)"
+            params += Array(repeating: "%\(text)%" as SQLBindable, count: 2)
         }
         let catalog = try catalog()
         return try db.query(sql + " ORDER BY start_ts", params).map { Self.timeEntry($0, catalog: catalog) }
