@@ -81,6 +81,20 @@ public struct EntrySuggester: Sendable {
         }
     }
 
+    /// Each labeled bucket in `range` with its interval; idle, unattributed
+    /// and contested buckets are left out.
+    func labeledBuckets(_ activities: [Activity], range: DateInterval) -> [(interval: DateInterval, label: Label)] {
+        labels(activities, range: range).enumerated().compactMap { i, label in
+            guard let label else { return nil }
+            return (bucketInterval(i, in: range), label)
+        }
+    }
+
+    private func bucketInterval(_ i: Int, in range: DateInterval) -> DateInterval {
+        let start = range.start.addingTimeInterval(Double(i) * bucket)
+        return DateInterval(start: start, end: min(start.addingTimeInterval(bucket), range.end))
+    }
+
     /// Suggested blocks in `range`, avoiding `occupied` intervals.
     public func blocks(from activities: [Activity], in range: DateInterval, avoiding occupied: [DateInterval]) -> [Block] {
         let labels = labels(activities, range: range)
@@ -214,16 +228,10 @@ extension Store {
         if !includeDrafts { filter.status = .confirmed }
         var totals: [String: (Double, Double)] = [:]
         for entry in try timeEntries(in: range, filter: filter, now: now) {
-            let start = max(entry.start, range.start)
-            let clipped = DateInterval(start: start, end: max(start, min(entry.end ?? max(now, entry.start), range.end)))
-            let pieces: [(String, TimeInterval)]
-            switch groupBy {
-            case .day: pieces = Self.splitByDay(clipped, calendar: calendar)
-            case .client: pieces = [(entry.client ?? Self.noClient, clipped.duration)]
-            case .category: pieces = [(entry.category ?? Self.noCategory, clipped.duration)]
-            default: pieces = [(entry.project ?? Self.noProject, clipped.duration)]
-            }
-            for (key, seconds) in pieces where seconds > 0 {
+            let clipped = TimeAccounting.clip(start: entry.start, end: entry.end, to: range, now: now)
+            let labels = TimeAccounting.Labels(project: entry.project, client: entry.client, category: entry.category)
+            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, calendar: calendar)
+            where seconds > 0 {
                 var t = totals[key] ?? (0, 0)
                 t.0 += seconds
                 if entry.billable { t.1 += seconds }
@@ -231,7 +239,7 @@ extension Store {
             }
         }
         return Self.sorted(totals.map { EntrySummaryRow(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
-                           byKey: groupBy == .day)
+                           groupBy: groupBy)
     }
 
     /// Attributed activity time that no confirmed entry covers: work that
@@ -250,30 +258,23 @@ extension Store {
             DateInterval(start: $0.start, end: max($0.start, $0.end ?? now))
         }
         let catalog = try catalog()
-        let labels = suggester.labels(try activities(in: range, now: now), range: range)
         var totals: [String: Double] = [:]
-        for (i, label) in labels.enumerated() {
-            guard let label else { continue }
-            let start = range.start.addingTimeInterval(Double(i) * suggester.bucket)
-            let bucket = DateInterval(start: start, end: min(start.addingTimeInterval(suggester.bucket), range.end))
+        for (bucket, label) in suggester.labeledBuckets(try activities(in: range, now: now), range: range) {
             let project = catalog.projects[label.projectID]
+            let labels = TimeAccounting.Labels(
+                project: project?.path ?? "#\(label.projectID)", client: project?.client,
+                category: label.categoryID.flatMap { catalog.categories[$0]?.name })
             for piece in EntrySuggester.subtract(covered, from: bucket) {
-                let pieces: [(String, TimeInterval)]
-                switch groupBy {
-                case .day: pieces = Self.splitByDay(piece, calendar: calendar)
-                case .client: pieces = [(project?.client ?? Self.noClient, piece.duration)]
-                case .category:
-                    pieces = [(label.categoryID.flatMap { catalog.categories[$0]?.name } ?? Self.noCategory, piece.duration)]
-                default: pieces = [(project?.path ?? "#\(label.projectID)", piece.duration)]
+                for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, calendar: calendar) {
+                    totals[key, default: 0] += seconds
                 }
-                for (key, seconds) in pieces { totals[key, default: 0] += seconds }
             }
         }
         return Self.sorted(totals.map { EntrySummaryRow(key: $0.key, seconds: $0.value, billableSeconds: 0) },
-                           byKey: groupBy == .day)
+                           groupBy: groupBy)
     }
 
-    private static func sorted(_ rows: [EntrySummaryRow], byKey: Bool) -> [EntrySummaryRow] {
-        rows.sorted { byKey ? $0.key < $1.key : ($0.seconds, $1.key) > ($1.seconds, $0.key) }
+    private static func sorted(_ rows: [EntrySummaryRow], groupBy: GroupBy) -> [EntrySummaryRow] {
+        TimeAccounting.sorted(rows, groupBy: groupBy, key: \.key, seconds: \.seconds)
     }
 }
