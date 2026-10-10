@@ -173,4 +173,27 @@ final class MCPServerTests: XCTestCase {
         let csv = try call("timesheet", ["range": "today", "client": "Beta", "format": "csv"])
         XCTAssertEqual(csv, "date,client,project,category,hours,billable_hours,notes\n2026-10-09,Beta,Rollout,Presales,1.00,0.00,demo\n")
     }
+
+    func testFiguresAreRoundedOnceAndTotalsComeFromSeconds() throws {
+        let t = now.addingTimeInterval(-3 * 3600)
+        let acme = try store.ensureProject("Acme / Phase 2")
+        for (i, category) in ["Implementation", "Meetings", "Presales"].enumerated() {
+            let start = t + Double(i) * 3600
+            // 20 minutes and 20 seconds each: groups round to 20.3, the 61 minute total to 61.0.
+            try store.createEntry(NewTimeEntry(start: start, end: start + 20 * 60 + 20, projectID: acme.id,
+                                               categoryID: try store.requireCategory(named: category).id,
+                                               origin: .manual), now: now)
+        }
+
+        let summary = try call("summarize", ["range": "today", "kind": "entries", "group_by": "category"])
+        XCTAssertEqual(summary["groups"], [["key": "Implementation", "minutes": .number(20.3), "billable_minutes": .number(20.3)],
+                                           ["key": "Meetings", "minutes": .number(20.3), "billable_minutes": .number(20.3)],
+                                           ["key": "Presales", "minutes": .number(20.3), "billable_minutes": 0]])
+        XCTAssertEqual(summary["total_minutes"], 61)
+        XCTAssertEqual(summary["billable_minutes"], .number(40.7))
+
+        let csv = try call("timesheet", ["range": "today", "format": "csv"])
+        XCTAssertEqual(csv.stringValue?.split(separator: "\n").dropFirst().map { $0.split(separator: ",")[4] },
+                       ["0.34", "0.34", "0.34"])
+    }
 }
