@@ -23,31 +23,24 @@ extension Store {
     public func budgetStatus(projectIDs: [Int64]? = nil, now: Date = Date()) throws -> [BudgetRow] {
         let projects = try projectIDs.map { try $0.compactMap { try project(id: $0) } }
             ?? self.projects().filter { $0.budgetHours != nil }
-        let totals = try db.query(
-            """
-            SELECT project_id, status, billable, SUM(COALESCE(end_ts, MAX(?, start_ts)) - start_ts) AS seconds
-            FROM time_entries WHERE project_id IS NOT NULL GROUP BY project_id, status, billable
-            """, [now])
-        var used: [Int64: (confirmed: Double, billable: Double, draft: Double)] = [:]
-        for row in totals {
-            guard let id = row.int("project_id") else { continue }
-            let hours = (row.double("seconds") ?? 0) / 3600
-            var t = used[id] ?? (0, 0, 0)
-            if row.string("status") == EntryStatus.draft.rawValue {
-                t.draft += hours
+        var confirmed = TimeAccounting.Tally<Int64>(), drafts = TimeAccounting.Tally<Int64>()
+        for entry in try timeEntries(in: TimeAccounting.allTime, now: now) {
+            guard let id = entry.projectID else { continue }
+            let seconds = TimeAccounting.clip(start: entry.start, end: entry.end, to: TimeAccounting.allTime, now: now).duration
+            if entry.status == .draft {
+                drafts.add(seconds, to: id)
             } else {
-                t.confirmed += hours
-                if row.int("billable") == 1 { t.billable += hours }
+                confirmed.add(seconds, to: id, billable: entry.billable)
             }
-            used[id] = t
         }
         return projects.map { p in
-            let t = used[p.id] ?? (0, 0, 0)
+            let used = confirmed[p.id].seconds / 3600
             return BudgetRow(
                 project: p.path, client: p.client, status: p.status, budgetHours: p.budgetHours,
-                usedHours: t.confirmed, billableHours: t.billable, draftHours: t.draft,
-                remainingHours: p.budgetHours.map { $0 - t.confirmed },
-                burn: p.budgetHours.map { t.confirmed / $0 }, endsOn: p.endsOn)
+                usedHours: used, billableHours: confirmed[p.id].billableSeconds / 3600,
+                draftHours: drafts[p.id].seconds / 3600,
+                remainingHours: p.budgetHours.map { $0 - used },
+                burn: p.budgetHours.map { used / $0 }, endsOn: p.endsOn)
         }.sorted { ($0.burn ?? -1) > ($1.burn ?? -1) }
     }
 
@@ -62,32 +55,38 @@ extension Store {
         public var notes: [String]
     }
 
-    /// One row per day × project × category, from confirmed entries.
+    /// One row per day × project × category, from confirmed entries (drafts
+    /// optional; a status filter, when given, decides instead).
     public func timesheet(
-        in range: DateInterval, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
+        in range: ReportRange, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> [TimesheetRow] {
-        var filter = filter
-        if !includeDrafts { filter.status = .confirmed }
         struct Key: Hashable { var date: String; var projectID: Int64?; var categoryID: Int64? }
+        let dates = try localDates(fallback: calendar)
+        let intervals = dates.intervals(range)
+        var tally = TimeAccounting.Tally<Key>()
         var rows: [Key: TimesheetRow] = [:]
-        for entry in try timeEntries(in: range, filter: filter, now: now) {
-            let start = max(entry.start, range.start)
-            let clipped = DateInterval(start: start, end: max(start, min(entry.end ?? max(now, entry.start), range.end)))
-            for (date, seconds) in Self.splitByDay(clipped, calendar: calendar) where seconds > 0 {
-                let key = Key(date: date, projectID: entry.projectID, categoryID: entry.categoryID)
-                var row = rows[key] ?? TimesheetRow(
-                    date: date, client: entry.client, project: entry.project, category: entry.category,
-                    hours: 0, billableHours: 0, notes: [])
-                row.hours += seconds / 3600
-                if entry.billable { row.billableHours += seconds / 3600 }
-                for note in [entry.title, entry.notes].compactMap({ $0 }) where !note.isEmpty && !row.notes.contains(note) {
-                    row.notes.append(note)
+        for entry in try timeEntries(overlapping: intervals, filter: filter.counting(drafts: includeDrafts), now: now) {
+            let keys = TimeAccounting.GroupKeys(project: entry.project, client: entry.client, category: entry.category)
+            func key(_ date: String) -> Key { Key(date: date, projectID: entry.projectID, categoryID: entry.categoryID) }
+            for clipped in TimeAccounting.clip(start: entry.start, end: entry.end, to: intervals, now: now) {
+                tally.add(clipped, groupBy: .day, keys: keys, dates: dates, billable: entry.billable, as: key)
+                for (date, _) in dates.split(clipped) {
+                    var row = rows[key(date)] ?? TimesheetRow(
+                        date: date, client: entry.client, project: entry.project, category: entry.category,
+                        hours: 0, billableHours: 0, notes: [])
+                    for note in [entry.title, entry.notes].compactMap({ $0 }) where !note.isEmpty && !row.notes.contains(note) {
+                        row.notes.append(note)
+                    }
+                    rows[key(date)] = row
                 }
-                rows[key] = row
             }
         }
-        return rows.values.sorted {
+        for (key, total) in tally.totals {
+            rows[key]?.hours = total.seconds / 3600
+            rows[key]?.billableHours = total.billableSeconds / 3600
+        }
+        return rows.values.filter { $0.hours > 0 }.sorted {
             ($0.date, $0.client ?? "", $0.project ?? "", $0.category ?? "")
                 < ($1.date, $1.client ?? "", $1.project ?? "", $1.category ?? "")
         }

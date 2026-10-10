@@ -147,6 +147,15 @@ public final class Store {
         DROP TABLE rules;
         ALTER TABLE rules_new RENAME TO rules;
         """,
+        // Zone history (ADR-0001): which time zone you were in, and from when.
+        """
+        CREATE TABLE zone_history(
+            id INTEGER PRIMARY KEY,
+            zone TEXT NOT NULL,
+            effective_ts REAL NOT NULL
+        );
+        CREATE INDEX zone_history_effective ON zone_history(effective_ts);
+        """,
     ]
 
     public init(path: String) throws {
@@ -292,7 +301,7 @@ public final class Store {
 
     /// Spans overlapping `range`, with project, category and client resolved.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter(), now: Date = Date()) throws -> [Activity] {
-        var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, ?) > ?"
+        var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, MAX(?, start_ts)) > ?"
         var params: [SQLBindable] = [range.end, now, range.start]
         if !filter.includeHidden { sql += " AND hidden = 0" }
         if let sources = filter.sources, !sources.isEmpty {
@@ -321,6 +330,26 @@ public final class Store {
         return result
     }
 
+    /// Spans with time on `range`'s local dates (or in its instants), oldest
+    /// first, with project, category and client resolved. When a local date
+    /// repeats, spans in the gap between its stretches are left out.
+    public func activities(
+        in range: ReportRange, filter: ActivityFilter = ActivityFilter(), calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [Activity] {
+        try activities(overlapping: try intervals(range, calendar: calendar), filter: filter, now: now)
+    }
+
+    /// Spans overlapping any of `intervals`, oldest first.
+    func activities(overlapping intervals: [DateInterval], filter: ActivityFilter, now: Date) throws -> [Activity] {
+        guard let hull = TimeAccounting.hull(intervals) else { return [] }
+        var unlimited = filter
+        unlimited.limit = nil
+        let spans = try activities(in: hull, filter: unlimited, now: now).filter {
+            TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
+        }
+        return filter.limit.map { Array(spans.prefix($0)) } ?? spans
+    }
+
     private static func activity(_ row: Row) -> Activity {
         Activity(
             id: row.int("id")!, start: row.date("start_ts")!, end: row.date("end_ts"),
@@ -330,71 +359,41 @@ public final class Store {
             assignedCategoryID: row.int("category_id"), note: row.string("note"), meta: row.string("meta"), hidden: row.int("hidden") == 1)
     }
 
-    // MARK: Summaries
+    // MARK: Evidence
 
     public enum GroupBy: String, CaseIterable, Sendable {
         case project, client, category, app, source, day
     }
 
-    public struct SummaryRow: Codable, Equatable, Sendable {
+    /// Evidence under one key: observed activity time per source.
+    public struct EvidenceRow: Codable, Equatable, Sendable {
         public var key: String
         /// Seconds per source. Sources are reported separately because they
         /// overlap in wall-clock time and must not be summed blindly.
         public var secondsBySource: [String: Double]
     }
 
-    public func summary(
-        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
+    /// Evidence: activity totals per source, to help write time entries.
+    /// Observed time, never claimed time, so never summed across sources.
+    public func evidence(
+        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [SummaryRow] {
-        var totals: [String: [String: Double]] = [:]
-        for activity in try activities(in: range, filter: filter, now: now) {
-            let clipped = DateInterval(
-                start: max(activity.start, range.start),
-                end: max(max(activity.start, range.start), min(activity.end ?? now, range.end)))
-            // Day grouping splits spans that cross midnight.
-            var pieces: [(String, TimeInterval)] = []
-            switch groupBy {
-            case .project: pieces = [(activity.project ?? Self.noProject, clipped.duration)]
-            case .client: pieces = [(activity.client ?? Self.noClient, clipped.duration)]
-            case .category: pieces = [(activity.category ?? Self.noCategory, clipped.duration)]
-            case .app: pieces = [(activity.appName ?? activity.source, clipped.duration)]
-            case .source: pieces = [(activity.source, clipped.duration)]
-            case .day: pieces = Self.splitByDay(clipped, calendar: calendar)
-            }
-            for (key, seconds) in pieces where seconds > 0 {
-                totals[key, default: [:]][activity.source, default: 0] += seconds
+    ) throws -> [EvidenceRow] {
+        struct Key: Hashable { var key: String; var source: String }
+        let dates = try localDates(fallback: calendar)
+        let intervals = dates.intervals(range)
+        var tally = TimeAccounting.Tally<Key>()
+        for activity in try activities(overlapping: intervals, filter: filter, now: now) {
+            let keys = TimeAccounting.GroupKeys(project: activity.project, client: activity.client,
+                                                category: activity.category, app: activity.appName, source: activity.source)
+            for clipped in TimeAccounting.clip(start: activity.start, end: activity.end, to: intervals, now: now) {
+                tally.add(clipped, groupBy: groupBy, keys: keys, dates: dates) { Key(key: $0, source: activity.source) }
             }
         }
-        return totals
-            .map { SummaryRow(key: $0.key, secondsBySource: $0.value) }
-            .sorted {
-                groupBy == .day ? $0.key < $1.key
-                    : $0.secondsBySource.values.reduce(0, +) > $1.secondsBySource.values.reduce(0, +)
-            }
-    }
-}
-
-extension Store {
-    static let noProject = "(no project)"
-    static let noClient = "(no client)"
-    static let noCategory = "(no category)"
-
-    /// Splits an interval at local midnights, keyed "yyyy-MM-dd".
-    static func splitByDay(_ interval: DateInterval, calendar: Calendar) -> [(String, TimeInterval)] {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        var pieces: [(String, TimeInterval)] = []
-        var cursor = interval.start
-        while cursor < interval.end {
-            let dayEnd = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: cursor))!
-            let pieceEnd = min(dayEnd, interval.end)
-            pieces.append((formatter.string(from: cursor), pieceEnd.timeIntervalSince(cursor)))
-            cursor = pieceEnd
-        }
-        return pieces
+        var rows: [String: [String: Double]] = [:]
+        for (key, total) in tally.totals { rows[key.key, default: [:]][key.source] = total.seconds }
+        return TimeAccounting.sorted(
+            rows.map { EvidenceRow(key: $0.key, secondsBySource: $0.value) }, groupBy: groupBy,
+            key: \.key, seconds: { $0.secondsBySource.values.reduce(0, +) })
     }
 }

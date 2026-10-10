@@ -136,8 +136,8 @@ final class SuggesterTests: XCTestCase {
         try store.createEntry(draft, now: now)  // drafts don't count as logged
         try store.createEntry(NewTimeEntry(start: t0, end: t0 + 15 * 60, origin: .manual), now: now)
 
-        let rows = try store.unloggedSummary(in: day, groupBy: .project, now: now)
-        XCTAssertEqual(rows.map(\.key), ["waid"])
-        XCTAssertEqual(rows.first?.seconds, 45 * 60)
+        let unlogged = try store.unloggedTime(in: .instants(day), groupBy: .project, now: now)
+        XCTAssertEqual(unlogged.groups.map(\.key), ["waid"])
+        XCTAssertEqual(unlogged.seconds, 45 * 60)
     }
 }

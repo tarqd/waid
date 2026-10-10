@@ -16,8 +16,16 @@ extension Store {
         public var projectID: Int64?
         public var clientID: Int64?
         public var categoryID: Int64?
+        /// Substring match on title or notes.
         public var text: String?
         public init() {}
+
+        /// Confirmed entries only, unless a status is asked for or drafts are included.
+        func counting(drafts includeDrafts: Bool) -> EntryFilter {
+            var filter = self
+            if !includeDrafts && filter.status == nil { filter.status = .confirmed }
+            return filter
+        }
     }
 
     /// Entries overlapping `range`, oldest first.
@@ -41,11 +49,28 @@ extension Store {
             params.append(categoryID)
         }
         if let text = filter.text, !text.isEmpty {
-            sql += " AND (title LIKE ? OR notes LIKE ? OR tags LIKE ?)"
-            params += Array(repeating: "%\(text)%" as SQLBindable, count: 3)
+            sql += " AND (title LIKE ? OR notes LIKE ?)"
+            params += Array(repeating: "%\(text)%" as SQLBindable, count: 2)
         }
         let catalog = try catalog()
         return try db.query(sql + " ORDER BY start_ts", params).map { Self.timeEntry($0, catalog: catalog) }
+    }
+
+    /// Entries with time on `range`'s local dates (or in its instants), oldest
+    /// first. When a local date repeats, entries in the gap between its
+    /// stretches are left out.
+    public func timeEntries(
+        in range: ReportRange, filter: EntryFilter = EntryFilter(), calendar: Calendar = .current, now: Date = Date()
+    ) throws -> [TimeEntry] {
+        try timeEntries(overlapping: try intervals(range, calendar: calendar), filter: filter, now: now)
+    }
+
+    /// Entries overlapping any of `intervals`, oldest first.
+    func timeEntries(overlapping intervals: [DateInterval], filter: EntryFilter, now: Date) throws -> [TimeEntry] {
+        guard let hull = TimeAccounting.hull(intervals) else { return [] }
+        return try timeEntries(in: hull, filter: filter, now: now).filter {
+            TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
+        }
     }
 
     public func runningEntry() throws -> TimeEntry? {

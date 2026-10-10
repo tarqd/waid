@@ -79,7 +79,7 @@ final class RuleTests: XCTestCase {
     }
 }
 
-final class SummaryTests: XCTestCase {
+final class EvidenceTests: XCTestCase {
     func testDayGroupingSplitsAtMidnightAndClipsToRange() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -89,14 +89,61 @@ final class SummaryTests: XCTestCase {
                                  sample: ActivitySample(appName: "Terminal"))
         try store.insertActivity(start: midnight, end: midnight + 600, source: Source.agent("claude-code"))
 
-        let rows = try store.summary(in: DateInterval(start: midnight - 86400, end: midnight + 86400),
+        let rows = try store.evidence(in: .instants(DateInterval(start: midnight - 86400, end: midnight + 86400)),
                                      groupBy: .day, calendar: calendar)
         XCTAssertEqual(rows.map(\.key), ["2026-10-08", "2026-10-09"])
         XCTAssertEqual(rows[0].secondsBySource, ["window": 1800])
         XCTAssertEqual(rows[1].secondsBySource, ["window": 3600, "agent:claude-code": 600])
 
-        let clipped = try store.summary(in: DateInterval(start: midnight, duration: 1200), groupBy: .source)
+        let clipped = try store.evidence(in: .instants(DateInterval(start: midnight, duration: 1200)), groupBy: .source)
         XCTAssertEqual(clipped.first { $0.key == "window" }?.secondsBySource["window"], 1200)
+    }
+}
+
+final class DaySplitTests: XCTestCase {
+    var calendar = Calendar(identifier: .gregorian)
+    var store: Store!
+    var midnight: Date!
+    var range: DateInterval { DateInterval(start: midnight - 86400, end: midnight + 86400) }
+    var now: Date { midnight + 6 * 3600 }
+
+    override func setUpWithError() throws {
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        store = try Store(path: ":memory:")
+        midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 9))!
+    }
+
+    func testSummaryAndTimesheetSplitEntriesAtMidnight() throws {
+        let waid = try store.ensureProject("waid")
+        try store.createEntry(NewTimeEntry(start: midnight - 1800, end: midnight + 3600, projectID: waid.id,
+                                           title: "late night", origin: .manual), now: now)
+
+        let days = try store.summary(in: .instants(range), groupBy: .day, calendar: calendar, now: now)
+        XCTAssertEqual(days.groups.map(\.key), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(days.groups.map(\.seconds), [1800, 3600])
+        XCTAssertEqual(days.seconds, 5400)
+
+        let rows = try store.timesheet(in: .instants(range), calendar: calendar, now: now)
+        XCTAssertEqual(rows.map(\.date), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(rows.map(\.hours), [0.5, 1])
+        XCTAssertEqual(rows.map(\.notes), [["late night"], ["late night"]])
+    }
+
+    func testUnloggedSplitsAtMidnightAndGroupsByClient() throws {
+        let acme = try store.createProject(name: "Phase 2", clientID: try store.ensureClient(named: "Acme").id)
+        try store.addRule(projectID: acme.id, field: .appName, op: .equals, pattern: "Xcode")
+        try store.insertActivity(start: midnight - 1800, end: midnight + 3600, source: Source.window,
+                                 sample: ActivitySample(appName: "Xcode", title: "acme"))
+
+        let days = try store.unloggedTime(in: .instants(range), groupBy: .day, calendar: calendar, now: now)
+        XCTAssertEqual(days.groups.map(\.key), ["2026-10-08", "2026-10-09"])
+        XCTAssertEqual(days.groups.map(\.seconds), [1800, 3600])
+        XCTAssertEqual(days.seconds, 5400)
+
+        let clients = try store.unloggedTime(in: .instants(range), groupBy: .client, calendar: calendar, now: now)
+        XCTAssertEqual(clients.groups.map(\.key), ["Acme"])
+        XCTAssertEqual(clients.groups.map(\.seconds), [5400])
+        XCTAssertEqual(try store.unloggedTime(in: .instants(range), groupBy: .project, now: now).groups.map(\.key), ["Acme / Phase 2"])
     }
 }
 
@@ -105,12 +152,21 @@ final class TimeRangeTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/New_York")!
         let now = TimeRange.parseDate("2026-10-09T15:00:00-04:00")!
-        let today = try TimeRange.resolve(range: "today", start: nil, end: nil, now: now, calendar: calendar)
-        XCTAssertEqual(today.start, TimeRange.parseDate("2026-10-09T00:00:00-04:00"))
-        XCTAssertEqual(today.duration, 86400)
+        let oct9 = LocalDate(year: 2026, month: 10, day: 9)
+        XCTAssertEqual(try TimeRange.resolve(range: "today", start: nil, end: nil, now: now, calendar: calendar),
+                       .localDates(oct9...oct9))
+        XCTAssertEqual(try TimeRange.resolve(range: nil, start: nil, end: nil, now: now, calendar: calendar),
+                       .localDates(oct9...oct9))
+        XCTAssertEqual(try TimeRange.resolve(range: "this_month", start: nil, end: nil, now: now, calendar: calendar),
+                       .localDates(LocalDate("2026-10-01")!...LocalDate("2026-10-31")!))
 
-        let span = try TimeRange.resolve(range: nil, start: "2026-10-01", end: "2026-10-02", now: now, calendar: calendar)
-        XCTAssertEqual(span.duration, 2 * 86400, "bare end date is inclusive")
+        XCTAssertEqual(try TimeRange.resolve(range: nil, start: "2026-10-01", end: "2026-10-02", now: now, calendar: calendar),
+                       .localDates(LocalDate("2026-10-01")!...LocalDate("2026-10-02")!), "bare end date is inclusive")
+
+        XCTAssertEqual(
+            try TimeRange.resolve(range: nil, start: "2026-10-01T09:00:00+09:00", end: "2026-10-01T17:00:00Z", now: now, calendar: calendar),
+            .instants(DateInterval(start: TimeRange.parseDate("2026-10-01T00:00:00Z")!, end: TimeRange.parseDate("2026-10-01T17:00:00Z")!)),
+            "timestamps with an offset are instants")
 
         XCTAssertThrowsError(try TimeRange.resolve(range: "fortnight", start: nil, end: nil))
         XCTAssertThrowsError(try TimeRange.resolve(range: nil, start: "2026-10-02", end: "2026-10-01T00:00:00Z"))

@@ -14,10 +14,12 @@ let usage = """
     USAGE:
       waid daemon [--interval SECONDS]   Track the frontmost app/window (macOS) and import agent sessions
       waid mcp                           Run the MCP server on stdio
-      waid report [RANGE] [--entries|--unlogged] [--by project|client|category|day]
-                                         Observed activities (default), confirmed time entries with
-                                         utilization, or activity not covered by any entry
-                                         (RANGE: \(TimeRange.names.joined(separator: ", ")))
+      waid report [RANGE] [--evidence|--unlogged] [--by project|client|category|day]
+                                         Summary of confirmed time entries with billable time and
+                                         utilization (default); --evidence shows observed activity per
+                                         source (also --by app|source); --unlogged shows work not yet
+                                         claimed, with billable time (RANGE: \(TimeRange.names.joined(separator: ", "));
+                                         ranges are local dates where you were, weeks start Monday)
       waid timesheet [RANGE] [--client NAME]
                                          Confirmed entries as CSV, one row per day/project/category
       waid budgets                       Hours used vs budget per engagement
@@ -41,13 +43,33 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
+/// Every process that opens the store reports the zone it's in (ADR-0001).
 func openStore() -> (Store, String) {
+    let opened: (Store, String)
     do {
         let path = try Store.defaultPath()
-        return (try Store(path: path), path)
+        opened = (try Store(path: path), path)
     } catch {
         fail("can't open database: \(error)")
     }
+    reportZone(to: opened.0)
+    return opened
+}
+
+/// The local dates a named range covers, counted from today where you are
+/// now per the zone history.
+func namedRange(_ name: String, store: Store) -> ReportRange? {
+    let now = Date()
+    let zone = ((try? store.calendar(at: now)) ?? .current).timeZone
+    return TimeRange.named(name, today: LocalDate(now, in: zone)).map(ReportRange.localDates)
+}
+
+/// Adds a zone-history record if the machine's zone has changed since the
+/// latest one. Re-reads the system zone, which Foundation otherwise caches for
+/// the life of the process.
+func reportZone(to store: Store) {
+    NSTimeZone.resetSystemTimeZone()
+    do { try store.recordZone(.current, now: Date()) } catch { log("recording time zone failed: \(error)") }
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -92,6 +114,7 @@ case "daemon":
         do { try ingestor.ingest(into: store) } catch { log("agent import failed: \(error)") }
     }
     func record(_ sample: ActivitySample?) {
+        reportZone(to: store)
         do { try recorder.record(sample, at: Date()) } catch { log("recording failed: \(error)") }
     }
     let center = NSWorkspace.shared.notificationCenter
@@ -124,29 +147,35 @@ case "report":
     let byName = option("--by") ?? "project"
     guard let groupBy = Store.GroupBy(rawValue: byName) else { fail("unknown --by \"\(byName)\"\n\n\(usage)") }
     let name = args.first { !$0.hasPrefix("--") } ?? "today"
-    guard let range = TimeRange.named(name) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
+    guard let range = namedRange(name, store: store) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
+    if args.contains("--unlogged") && args.contains("--evidence") {
+        fail("--unlogged and --evidence are different reports; pass one\n\n\(usage)")
+    }
     func pad(_ s: String, _ n: Int) -> String { s.padding(toLength: n, withPad: " ", startingAt: 0) }
+    /// A Summary or Unlogged time as a table: one row per group, then the total.
+    func printTotals(_ totals: Store.TimeTotals, column: String, totalSuffix: String = "") {
+        let width = max(12, totals.groups.map(\.key.count).max() ?? 0)
+        print(pad(byName, width) + "  " + pad(column, 10) + "billable")
+        for group in totals.groups {
+            print(pad(group.key, width) + "  " + pad(formatMinutes(group.seconds), 10) + formatMinutes(group.billableSeconds))
+        }
+        print(pad("total", width) + "  " + pad(formatMinutes(totals.seconds), 10) + formatMinutes(totals.billableSeconds) + totalSuffix)
+    }
     do {
-        if args.contains("--entries") || args.contains("--unlogged") {
-            let entries = args.contains("--entries")
-            let rows = entries
-                ? try store.entrySummary(in: range, groupBy: groupBy)
-                : try store.unloggedSummary(in: range, groupBy: groupBy)
-            guard !rows.isEmpty else { print("nothing \(entries ? "logged" : "unlogged") \(name)"); break }
-            let width = max(12, rows.map(\.key.count).max() ?? 0)
-            print(pad(byName, width) + "  time      " + (entries ? "billable" : ""))
-            for row in rows {
-                print(pad(row.key, width) + "  " + pad(formatMinutes(row.seconds), 10)
-                      + (entries ? formatMinutes(row.billableSeconds) : ""))
-            }
-            if entries {
-                let total = rows.reduce(0) { $0 + $1.seconds }, billable = rows.reduce(0) { $0 + $1.billableSeconds }
-                print(pad("total", width) + "  " + pad(formatMinutes(total), 10) + formatMinutes(billable)
-                      + (total > 0 ? "  (\(Int((billable / total * 100).rounded()))% utilization)" : ""))
-            }
+        if args.contains("--unlogged") {
+            let unlogged = try store.unloggedTime(in: range, groupBy: groupBy)
+            guard !unlogged.groups.isEmpty else { print("nothing unlogged \(name)"); break }
+            printTotals(unlogged, column: "unlogged")
             break
         }
-        let rows = try store.summary(in: range, groupBy: groupBy)
+        guard args.contains("--evidence") else {
+            let summary = try store.summary(in: range, groupBy: groupBy)
+            guard !summary.groups.isEmpty else { print("nothing logged \(name)"); break }
+            printTotals(summary, column: "time",
+                        totalSuffix: summary.utilization.map { "  (\(Int(($0 * 100).rounded()))% utilization)" } ?? "")
+            break
+        }
+        let rows = try store.evidence(in: range, groupBy: groupBy)
         let sources = Set(rows.flatMap { $0.secondsBySource.keys }).sorted()
         guard !rows.isEmpty else { print("nothing tracked \(name)"); break }
         let width = max(12, rows.map(\.key.count).max() ?? 0)
@@ -164,7 +193,7 @@ case "timesheet":
     let (store, _) = openStore()
     let clientName = option("--client")
     let name = args.first ?? "this_week"
-    guard let range = TimeRange.named(name) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
+    guard let range = namedRange(name, store: store) else { fail("unknown range \"\(name)\"\n\n\(usage)") }
     do {
         var filter = Store.EntryFilter()
         filter.clientID = try clientName.map { try store.requireClient(named: $0).id }
