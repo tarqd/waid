@@ -22,7 +22,7 @@ final class DurationTests: XCTestCase {
     func testRunningActivityStartingAfterNowCountsAsZero() throws {
         try store.insertActivity(start: now + 600, end: nil, source: Source.window,
                                  sample: ActivitySample(appName: "Xcode"))
-        let listed = try store.activities(in: day, now: now)
+        let listed = try store.activities(in: day)
         XCTAssertEqual(listed.map { $0.duration(now: now) }, [0])
         XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now), [])
     }

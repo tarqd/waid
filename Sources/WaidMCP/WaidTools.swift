@@ -200,7 +200,7 @@ public enum WaidTools {
                 let latest = try store.latestActivity(source: Source.window)
                     .flatMap { now().timeIntervalSince($0.end ?? now()) < 60 ? $0 : nil }
                 let current = try latest.flatMap { a in
-                    try store.activities(in: DateInterval(start: a.start, end: max(a.end ?? now(), a.start + 1)), now: now())
+                    try store.activities(in: DateInterval(start: a.start, end: max(a.end ?? now(), a.start + 1)))
                         .first { $0.id == a.id }
                 }
                 let unlogged = try store.unloggedTime(in: try named("today"), groupBy: .project, now: now())
@@ -682,7 +682,7 @@ public enum WaidTools {
                 if project != nil || category != nil {
                     try store.assign(activityIDs: [id], projectID: project, categoryID: category)
                 }
-                let resolved = try store.activities(in: DateInterval(start: start, end: max(end, start + 1)), now: now())
+                let resolved = try store.activities(in: DateInterval(start: start, end: max(end, start + 1)))
                     .first { $0.id == id }
                 return ActivityView(try resolved ?? store.activity(id: id)!, now: now())
             },

@@ -370,7 +370,7 @@ public final class Store {
     }
 
     /// Spans overlapping `range`, with project, category and client resolved.
-    public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter(), now: Date = Date()) throws -> [Activity] {
+    public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter()) throws -> [Activity] {
         var sql = "SELECT * FROM observations WHERE stream = 'focus' AND start_ts < ? AND end_ts > ?"
         var params: [SQLBindable] = [range.end, range.start]
         if !filter.includeHidden { sql += " AND hidden = 0" }
@@ -414,7 +414,7 @@ public final class Store {
         guard let hull = TimeAccounting.hull(intervals) else { return [] }
         var unlimited = filter
         unlimited.limit = nil
-        let spans = try activities(in: hull, filter: unlimited, now: now).filter {
+        let spans = try activities(in: hull, filter: unlimited).filter {
             TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
         }
         return filter.limit.map { Array(spans.prefix($0)) } ?? spans

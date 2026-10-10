@@ -74,7 +74,7 @@ final class ProfessionalServicesTests: XCTestCase {
         try store.insertActivity(start: t0 + 1800, end: t0 + 2400, source: Source.window,
                                  sample: ActivitySample(appName: "Safari", title: "PROJ-12", url: "https://eu.acme.atlassian.net/browse/PROJ-12"))
 
-        let spans = try store.activities(in: day, now: now)
+        let spans = try store.activities(in: day)
         XCTAssertEqual(spans[0].project, "Acme / Phase 2")
         XCTAssertEqual(spans[0].category, "Meetings")
         XCTAssertEqual(spans[0].client, "Acme")

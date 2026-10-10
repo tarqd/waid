@@ -217,7 +217,7 @@ extension Store {
                 let occupied = try timeEntries(in: range, now: now).map {
                     DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
                 }
-                let blocks = suggester.blocks(from: try activities(in: range, now: now), in: range, avoiding: occupied)
+                let blocks = suggester.blocks(from: try activities(in: range), in: range, avoiding: occupied)
                 return try blocks.map { block in
                     var new = NewTimeEntry(start: block.start, end: block.end, projectID: block.label.projectID,
                                            categoryID: block.label.categoryID, title: block.title, origin: .suggested)
@@ -326,7 +326,7 @@ extension Store {
         var tally = TimeAccounting.Tally<String>()
         // Buckets are laid out per stretch, as suggestEntries lays them out.
         for interval in intervals {
-            let activities = try activities(in: interval, filter: observed, now: now)
+            let activities = try activities(in: interval, filter: observed)
             for (bucket, label) in suggester.labeledBuckets(activities, range: interval) {
                 let project = catalog.projects[label.projectID]
                 if let projectID = filter.projectID, label.projectID != projectID { continue }
