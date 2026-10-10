@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0002
+---
+
 # Local dates come from a zone history, not a zone on each span
 
 People travel, and a timesheet must show Tuesday-in-Tokyo as Tuesday no matter where or when it is read. Timestamps stay UTC; waid records a zone history (the zone in effect, and from when, written by any waid process that notices a change), and every span's local date is derived from it. Date-shaped ranges ("today", "this_week", a date) select by local date; explicit timestamps are instants.
