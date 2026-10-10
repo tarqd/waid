@@ -234,7 +234,7 @@ extension Store {
     }
 
     /// The Summary of confirmed time entries (drafts optional), grouped by
-    /// project, client, category or day.
+    /// project, client, category or day. A status filter, when given, decides instead.
     public func summary(
         in range: ReportRange, groupBy: GroupBy, filter: EntryFilter = EntryFilter(), includeDrafts: Bool = false,
         calendar: Calendar = .current, now: Date = Date()
@@ -242,8 +242,7 @@ extension Store {
         guard [.project, .client, .category, .day].contains(groupBy) else {
             throw StoreError.invalid("time entries can be grouped by project, client, category or day, not \(groupBy.rawValue)")
         }
-        var filter = filter
-        if !includeDrafts { filter.status = .confirmed }
+        let filter = filter.counting(drafts: includeDrafts)
         let dates = try localDates(fallback: calendar)
         let intervals = dates.intervals(range)
         var totals: [String: (Double, Double)] = [:]
@@ -290,14 +289,25 @@ extension Store {
 
     /// Unlogged time: work a suggestion would offer to claim (buckets where one
     /// project dominates, agents excluded) minus confirmed time entries.
-    /// Billable seconds follow the bucket label's project and category, by the
-    /// same rule as time entries (`Catalog.defaultBillable`).
+    /// Project, client and category filters match the bucket's label; text and
+    /// sources don't apply to a bucket and are rejected. Billable seconds follow
+    /// the bucket label's project and category, by the same rule as time entries
+    /// (`Catalog.defaultBillable`).
     public func unloggedTime(
-        in range: ReportRange, groupBy: GroupBy, using suggester: EntrySuggester = EntrySuggester(),
-        calendar: Calendar = .current, now: Date = Date()
+        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
+        using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
     ) throws -> UnloggedTime {
         guard [.project, .client, .category, .day].contains(groupBy) else {
             throw StoreError.invalid("unlogged time can be grouped by project, client, category or day, not \(groupBy.rawValue)")
+        }
+        let unsupported = [
+            ("text", filter.text.map { !$0.isEmpty } ?? false),
+            ("sources", filter.sources.map { !$0.isEmpty } ?? false),
+            ("uncategorized_only", filter.uncategorizedOnly),
+        ].filter(\.1).map(\.0)
+        guard unsupported.isEmpty else {
+            throw StoreError.invalid("unlogged time can't be filtered by \(unsupported.joined(separator: " or ")); "
+                + "it can be filtered by project, client or category")
         }
         let dates = try localDates(fallback: calendar)
         // Nothing after now is unlogged yet.
@@ -305,15 +315,20 @@ extension Store {
             i.start < now ? DateInterval(start: i.start, end: min(i.end, now)) : nil
         }
         guard let range = TimeAccounting.hull(intervals) else { return UnloggedTime(groups: []) }
-        var filter = EntryFilter()
-        filter.status = .confirmed
-        let covered = try timeEntries(in: range, filter: filter, now: now).map {
+        var confirmed = EntryFilter()
+        confirmed.status = .confirmed
+        let covered = try timeEntries(in: range, filter: confirmed, now: now).map {
             DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
         }
         let catalog = try catalog()
         var totals: [String: (Double, Double)] = [:]
-        for (bucket, label) in suggester.labeledBuckets(try activities(in: range, now: now), range: range) {
+        var observed = ActivityFilter()
+        observed.includeHidden = filter.includeHidden
+        for (bucket, label) in suggester.labeledBuckets(try activities(in: range, filter: observed, now: now), range: range) {
             let project = catalog.projects[label.projectID]
+            if let projectID = filter.projectID, label.projectID != projectID { continue }
+            if let clientID = filter.clientID, project?.clientID != clientID { continue }
+            if let categoryID = filter.categoryID, label.categoryID != categoryID { continue }
             let labels = TimeAccounting.Labels(
                 project: project?.path ?? "#\(label.projectID)", client: project?.client,
                 category: label.categoryID.flatMap { catalog.categories[$0]?.name })
@@ -335,10 +350,10 @@ extension Store {
 
     /// Unlogged time over exact instants.
     public func unloggedTime(
-        in range: DateInterval, groupBy: GroupBy, using suggester: EntrySuggester = EntrySuggester(),
-        calendar: Calendar = .current, now: Date = Date()
+        in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
+        using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
     ) throws -> UnloggedTime {
-        try unloggedTime(in: .instants(range), groupBy: groupBy, using: suggester, calendar: calendar, now: now)
+        try unloggedTime(in: .instants(range), groupBy: groupBy, filter: filter, using: suggester, calendar: calendar, now: now)
     }
 
     private static func sorted(_ rows: [TimeGroup], groupBy: GroupBy) -> [TimeGroup] {
