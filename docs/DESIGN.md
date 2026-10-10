@@ -81,6 +81,8 @@ kv            key, value                                         -- bookkeeping 
 
 The schema is one CREATE block of STRICT tables, and SQLite enforces the observation rules itself: CHECKs keep `end_ts >= start_ts` and the payload and `external_id` on focus, a trigger rejects an observation overlapping another of the same stream and source (imported agent segments, which have an `external_id`, may overlap each other, since sessions run in parallel), and a trigger rejects changes to the time, identity, zone and payload of a closed observation with no `external_id`. Overrides and `meta` stay editable on any row, and imported rows stay upsertable. An Activity is a focus observation (`GLOSSARY.md`).
 
+The closed-row trigger also freezes `open` and `external_id`: the trigger only guards rows that are closed and have no `external_id`, so reopening a row or giving it one would take it out of the trigger's reach and let its time be rewritten.
+
 Terms below (Summary, Evidence, Unlogged time, Report) are defined in [`GLOSSARY.md`](../GLOSSARY.md).
 
 Claimed time:
