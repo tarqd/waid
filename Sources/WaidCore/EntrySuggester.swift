@@ -226,11 +226,12 @@ extension Store {
         }
         var filter = filter
         if !includeDrafts { filter.status = .confirmed }
+        let dates = try localDates(fallback: calendar)
         var totals: [String: (Double, Double)] = [:]
         for entry in try timeEntries(in: range, filter: filter, now: now) {
             let clipped = TimeAccounting.clip(start: entry.start, end: entry.end, to: range, now: now)
             let labels = TimeAccounting.Labels(project: entry.project, client: entry.client, category: entry.category)
-            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, calendar: calendar)
+            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
             where seconds > 0 {
                 var t = totals[key] ?? (0, 0)
                 t.0 += seconds
@@ -258,6 +259,7 @@ extension Store {
             DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
         }
         let catalog = try catalog()
+        let dates = try localDates(fallback: calendar)
         var totals: [String: Double] = [:]
         for (bucket, label) in suggester.labeledBuckets(try activities(in: range, now: now), range: range) {
             let project = catalog.projects[label.projectID]
@@ -265,7 +267,7 @@ extension Store {
                 project: project?.path ?? "#\(label.projectID)", client: project?.client,
                 category: label.categoryID.flatMap { catalog.categories[$0]?.name })
             for piece in EntrySuggester.subtract(covered, from: bucket) {
-                for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, calendar: calendar) {
+                for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, dates: dates) {
                     totals[key, default: 0] += seconds
                 }
             }

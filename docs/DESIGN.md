@@ -81,6 +81,8 @@ Two professional-services reports sit on top:
 - **Budget status**: confirmed hours against `budget_hours` per engagement, plus unconfirmed drafts, remaining hours and burn.
 - **Timesheet**: one row per day × project × category, with entry titles and notes as the billing narrative, exportable as CSV.
 
+Days in every report are **local dates**: the date where you were when the time happened, from the zone history waid records as you travel, not the zone the report runs in. A span crossing a zone change or local midnight is split, and each piece lands on its own local date. See `GLOSSARY.md` (Zone history, Local date) and [ADR-0001](adr/0001-zone-history.md).
+
 ### Suggesting entries
 
 `suggest_time_entries` cuts the range into 1-minute buckets and labels each with the project holding most of its active time, plus the category holding most of that project's time. Buckets that are idle, unattributed or contested get no label. Runs with the same project and category within 5 minutes are merged, absorbing a short interruption between them (Xcode, a quick Slack check, Xcode → one block). Time already covered by entries is cut out, blocks under 10 minutes are dropped, and each draft is titled from its biggest window titles or agent session summaries. Re-running replaces earlier suggestions in the range but never touches confirmed entries or drafts the user made.

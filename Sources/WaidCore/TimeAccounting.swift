@@ -36,13 +36,13 @@ enum TimeAccounting {
         return DateInterval(start: start, end: max(start, min(spanEnd, range.end)))
     }
 
-    /// The keyed pieces of `interval` under `groupBy`. Day grouping splits at
-    /// local midnight; every other grouping yields a single piece.
+    /// The keyed pieces of `interval` under `groupBy`. Day grouping splits by
+    /// local date; every other grouping yields a single piece.
     static func pieces(
-        of interval: DateInterval, groupBy: Store.GroupBy, labels: Labels, calendar: Calendar
+        of interval: DateInterval, groupBy: Store.GroupBy, labels: Labels, dates: LocalDates
     ) -> [(key: String, seconds: TimeInterval)] {
         switch groupBy {
-        case .day: return splitByDay(interval, calendar: calendar)
+        case .day: return dates.split(interval)
         case .project: return [(labels.project ?? noProject, interval.duration)]
         case .client: return [(labels.client ?? noClient, interval.duration)]
         case .category: return [(labels.category ?? noCategory, interval.duration)]
@@ -51,22 +51,41 @@ enum TimeAccounting {
         }
     }
 
-    /// Splits an interval at local midnights, keyed "yyyy-MM-dd".
-    static func splitByDay(_ interval: DateInterval, calendar: Calendar) -> [(key: String, seconds: TimeInterval)] {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        var pieces: [(key: String, seconds: TimeInterval)] = []
-        var cursor = interval.start
-        while cursor < interval.end {
-            let dayEnd = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: cursor))!
-            let pieceEnd = min(dayEnd, interval.end)
-            pieces.append((formatter.string(from: cursor), pieceEnd.timeIntervalSince(cursor)))
-            cursor = pieceEnd
+    /// Which Local date each instant falls on: the date where you were, per
+    /// the zone history (GLOSSARY.md, ADR-0001). Time before the first record
+    /// is in the first recorded zone; with no history at all, `fallback` is used.
+    struct LocalDates {
+        /// Zone changes, oldest first.
+        var history: [ZoneChange]
+        var fallback: TimeZone
+
+        func zone(at date: Date) -> TimeZone {
+            (history.last { $0.effectiveFrom <= date } ?? history.first)?.zone ?? fallback
         }
-        return pieces
+
+        /// Splits an interval at zone changes, then each piece at its local
+        /// midnights, keyed by local date "yyyy-MM-dd".
+        func split(_ interval: DateInterval) -> [(key: String, seconds: TimeInterval)] {
+            var pieces: [(key: String, seconds: TimeInterval)] = []
+            var cursor = interval.start
+            while cursor < interval.end {
+                let zone = self.zone(at: cursor)
+                let nextChange = history.first { $0.effectiveFrom > cursor }?.effectiveFrom ?? .distantFuture
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = zone
+                let midnight = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: cursor))!
+                let pieceEnd = min(midnight, nextChange, interval.end)
+                let day = calendar.dateComponents([.year, .month, .day], from: cursor)
+                let key = String(format: "%04d-%02d-%02d", day.year!, day.month!, day.day!)
+                if let last = pieces.last, last.key == key {
+                    pieces[pieces.count - 1].seconds += pieceEnd.timeIntervalSince(cursor)
+                } else {
+                    pieces.append((key, pieceEnd.timeIntervalSince(cursor)))
+                }
+                cursor = pieceEnd
+            }
+            return pieces
+        }
     }
 
     /// Grouped rows in report order: days chronologically, everything else

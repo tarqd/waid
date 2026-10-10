@@ -32,7 +32,13 @@ extension Store {
     /// been recorded yet.
     public func zone(at date: Date) throws -> TimeZone? {
         let history = try zoneHistory()
-        return (history.last { $0.effectiveFrom <= date } ?? history.first)?.zone
+        return history.isEmpty ? nil : TimeAccounting.LocalDates(history: history, fallback: .current).zone(at: date)
+    }
+
+    /// Local dates per the zone history, falling back to `calendar`'s zone
+    /// only when nothing has been recorded yet.
+    func localDates(fallback calendar: Calendar) throws -> TimeAccounting.LocalDates {
+        TimeAccounting.LocalDates(history: try zoneHistory(), fallback: calendar.timeZone)
     }
 
     /// The zone history, oldest first.
