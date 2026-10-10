@@ -243,11 +243,12 @@ extension Store {
             throw StoreError.invalid("time entries can be grouped by project, client, category or day, not \(groupBy.rawValue)")
         }
         let filter = filter.counting(drafts: includeDrafts)
+        let dates = try localDates(fallback: calendar)
         var totals: [String: (Double, Double)] = [:]
         for entry in try timeEntries(in: range, filter: filter, now: now) {
             let clipped = TimeAccounting.clip(start: entry.start, end: entry.end, to: range, now: now)
             let labels = TimeAccounting.Labels(project: entry.project, client: entry.client, category: entry.category)
-            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, calendar: calendar)
+            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
             where seconds > 0 {
                 var t = totals[key] ?? (0, 0)
                 t.0 += seconds
@@ -278,7 +279,9 @@ extension Store {
     /// Unlogged time: work a suggestion would offer to claim (buckets where one
     /// project dominates, agents excluded) minus confirmed time entries.
     /// Project, client and category filters match the bucket's label; text and
-    /// sources don't apply to a bucket and are rejected.
+    /// sources don't apply to a bucket and are rejected. Billable seconds follow
+    /// the bucket label's project and category, by the same rule as time entries
+    /// (`Catalog.defaultBillable`).
     public func unloggedTime(
         in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         using suggester: EntrySuggester = EntrySuggester(), calendar: Calendar = .current, now: Date = Date()
@@ -302,7 +305,8 @@ extension Store {
             DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
         }
         let catalog = try catalog()
-        var totals: [String: Double] = [:]
+        let dates = try localDates(fallback: calendar)
+        var totals: [String: (Double, Double)] = [:]
         var observed = ActivityFilter()
         observed.includeHidden = filter.includeHidden
         for (bucket, label) in suggester.labeledBuckets(try activities(in: range, filter: observed, now: now), range: range) {
@@ -313,13 +317,17 @@ extension Store {
             let labels = TimeAccounting.Labels(
                 project: project?.path ?? "#\(label.projectID)", client: project?.client,
                 category: label.categoryID.flatMap { catalog.categories[$0]?.name })
+            let billable = catalog.defaultBillable(projectID: label.projectID, categoryID: label.categoryID)
             for piece in EntrySuggester.subtract(covered, from: bucket) {
-                for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, calendar: calendar) {
-                    totals[key, default: 0] += seconds
+                for (key, seconds) in TimeAccounting.pieces(of: piece, groupBy: groupBy, labels: labels, dates: dates) {
+                    var t = totals[key] ?? (0, 0)
+                    t.0 += seconds
+                    if billable { t.1 += seconds }
+                    totals[key] = t
                 }
             }
         }
-        return UnloggedTime(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value, billableSeconds: 0) },
+        return UnloggedTime(groups: Self.sorted(totals.map { TimeGroup(key: $0.key, seconds: $0.value.0, billableSeconds: $0.value.1) },
                                                 groupBy: groupBy))
     }
 

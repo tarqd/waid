@@ -29,7 +29,8 @@ public enum WaidTools {
         how much time went to a client or project.
         - Evidence (evidence tool) is for claiming time, never presented as claimed time. kind=activities \
         totals observed activity per source; sources overlap, so they are never summed. kind=unlogged is \
-        Unlogged time: work a suggestion would offer to claim, minus confirmed entries.
+        Unlogged time: work a suggestion would offer to claim, minus confirmed entries, with billable \
+        minutes derived from the project and category as for time entries; claim billable work first.
         Breaking change: summarize used to default to activities and took a kind; it now reports time \
         entries only. Use the evidence tool for activities and unlogged time.
 
@@ -185,7 +186,7 @@ public enum WaidTools {
 
             Tool(
                 name: "get_status",
-                description: "What the user is doing right now: current frontmost activity, running timer, today's unlogged minutes, and when agent sessions were last imported.",
+                description: "What the user is doing right now: current frontmost activity, running timer, today's unlogged minutes (and how many are billable), and when agent sessions were last imported.",
                 inputSchema: schema([:]), readOnly: true
             ) { _, _ in
                 let latest = try store.latestActivity(source: Source.window)
@@ -200,6 +201,7 @@ public enum WaidTools {
                     current: current.map { ActivityView($0, now: now()) },
                     runningTimer: try store.runningEntry().map { EntryView($0, now: now()) },
                     unloggedTodayMinutes: minutes(unlogged.seconds),
+                    unloggedTodayBillableMinutes: minutes(unlogged.billableSeconds),
                     lastAgentImport: try store.value(forKey: "ingest.claude-code.last_run")
                         .flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
             },
@@ -254,7 +256,8 @@ public enum WaidTools {
                     kind=activities (default): observed activity time in minutes per source (window, agent:*), never \
                     summed across sources; group_by project, client, category, app, source or day. \
                     kind=unlogged: work a suggestion would offer to claim (stretches where one project dominates, \
-                    agents excluded) not covered by a confirmed time entry; group_by project, client, category or day; \
+                    agents excluded) not covered by a confirmed time entry, with billable minutes derived from the \
+                    project and category as for time entries; group_by project, client, category or day; \
                     project, client and category filters match the stretch's project and category; text and sources \
                     don't apply. For claimed time use summarize.
                     """,
@@ -760,9 +763,11 @@ struct Status: Encodable {
     var current: ActivityView?
     var runningTimer: EntryView?
     var unloggedTodayMinutes: Double
+    var unloggedTodayBillableMinutes: Double
     var lastAgentImport: Date?
     enum CodingKeys: String, CodingKey {
         case now, current, runningTimer = "running_timer", unloggedTodayMinutes = "unlogged_today_minutes"
+        case unloggedTodayBillableMinutes = "unlogged_today_billable_minutes"
         case lastAgentImport = "last_agent_import"
     }
 }
@@ -817,6 +822,7 @@ struct EvidenceTotalsView: Encodable {
     var unloggedGroups: [TimeGroupView]?
     /// Unlogged time only: activity totals per source have no single total.
     var totalMinutes: Double?
+    var billableMinutes: Double?
 
     init(start: Date, end: Date, groupBy: String, activities: [Store.EvidenceRow]) {
         self.start = start; self.end = end; self.groupBy = groupBy; kind = "activities"
@@ -825,8 +831,11 @@ struct EvidenceTotalsView: Encodable {
 
     init(start: Date, end: Date, groupBy: String, unlogged: Store.UnloggedTime) {
         self.start = start; self.end = end; self.groupBy = groupBy; kind = "unlogged"
-        unloggedGroups = unlogged.groups.map { TimeGroupView(key: $0.key, minutes: WaidTools.minutes($0.seconds)) }
+        unloggedGroups = unlogged.groups.map {
+            TimeGroupView(key: $0.key, minutes: WaidTools.minutes($0.seconds), billableMinutes: WaidTools.minutes($0.billableSeconds))
+        }
         totalMinutes = WaidTools.minutes(unlogged.seconds)
+        billableMinutes = WaidTools.minutes(unlogged.billableSeconds)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -838,10 +847,12 @@ struct EvidenceTotalsView: Encodable {
         if let activityGroups { try c.encode(activityGroups, forKey: .groups) }
         if let unloggedGroups { try c.encode(unloggedGroups, forKey: .groups) }
         try c.encodeIfPresent(totalMinutes, forKey: .totalMinutes)
+        try c.encodeIfPresent(billableMinutes, forKey: .billableMinutes)
     }
 
     enum CodingKeys: String, CodingKey {
         case start, end, kind, groups, groupBy = "group_by", totalMinutes = "total_minutes"
+        case billableMinutes = "billable_minutes"
     }
 }
 
