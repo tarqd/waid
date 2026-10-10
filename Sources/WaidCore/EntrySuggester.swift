@@ -135,7 +135,7 @@ public struct EntrySuggester: Sendable {
 
         // Cut out time already claimed by entries, then drop what's too short.
         let free = merged.flatMap { block in
-            Self.subtract(occupied, from: DateInterval(start: block.start, end: block.end)).map {
+            TimeAccounting.subtract(occupied, from: [DateInterval(start: block.start, end: block.end)]).map {
                 Block(label: block.label, start: $0.start, end: $0.end)
             }
         }
@@ -166,10 +166,6 @@ public struct EntrySuggester: Sendable {
         if contributors.count > 1, contributors[1].seconds >= first.seconds / 4 { title += " · " + contributors[1].label }
         return title.count <= 100 ? title : String(title.prefix(99)) + "…"
     }
-
-    static func subtract(_ occupied: [DateInterval], from interval: DateInterval) -> [DateInterval] {
-        TimeAccounting.subtract(occupied, from: [interval])
-    }
 }
 
 extension Store {
@@ -195,9 +191,7 @@ extension Store {
                     [EntryOrigin.suggested.rawValue, EntryStatus.draft.rawValue, stretch.interval.end, stretch.interval.start])
             }
             return try stretches.flatMap { stretch in
-                let occupied = try timeEntries(in: stretch.interval, now: now).map {
-                    DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
-                }
+                let occupied = try entryIntervals(in: stretch.interval, now: now)
                 let blocks = suggester.blocks(from: stretch.activities, in: stretch.interval, avoiding: occupied)
                 return try blocks.map { block in
                     var new = NewTimeEntry(start: block.start, end: block.end, projectID: block.label.projectID,
@@ -234,7 +228,7 @@ extension Store {
             let activities = byDay[day]!
             let zones = Set(activities.map(\.zone)).compactMap(TimeZone.init(identifier:))
             let days = zones.map { DateInterval(start: day.start(in: $0), end: day.adding(days: 1).start(in: $0)) }
-            return Self.union(days).compactMap { interval in
+            return TimeAccounting.merge(days).compactMap { interval in
                 var start = interval.start, end = min(interval.end, now)
                 if case .instants(let instants) = range {
                     start = max(start, instants.start)
@@ -259,14 +253,13 @@ extension Store {
         }
     }
 
-    /// Overlapping or touching intervals joined, in order.
-    private static func union(_ intervals: [DateInterval]) -> [DateInterval] {
-        intervals.sorted { $0.start < $1.start }.reduce(into: []) { result, interval in
-            if let last = result.last, interval.start <= last.end {
-                result[result.count - 1] = DateInterval(start: last.start, end: max(last.end, interval.end))
-            } else {
-                result.append(interval)
-            }
+    /// The instants of the time entries overlapping `range` that `filter`
+    /// keeps, a running one up to `now`.
+    private func entryIntervals(
+        in range: DateInterval, filter: EntryFilter = EntryFilter(), now: Date
+    ) throws -> [DateInterval] {
+        try timeEntries(in: range, filter: filter, now: now).map {
+            DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
         }
     }
 
@@ -355,9 +348,7 @@ extension Store {
         var tally = TimeAccounting.Tally<String>()
         // Buckets are laid out per local date, each on the activities stamped with it.
         for stretch in try stretches(of: range, filter: observed, now: now) {
-            let covered = try timeEntries(in: stretch.interval, filter: confirmed, now: now).map {
-                DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
-            }
+            let covered = try entryIntervals(in: stretch.interval, filter: confirmed, now: now)
             for (bucket, label) in suggester.labeledBuckets(stretch.activities, range: stretch.interval) {
                 let project = catalog.projects[label.projectID]
                 if let projectID = filter.projectID, label.projectID != projectID { continue }
@@ -367,7 +358,7 @@ extension Store {
                     project: project?.path ?? "#\(label.projectID)", client: project?.client,
                     category: label.categoryID.flatMap { catalog.categories[$0]?.name })
                 let billable = catalog.defaultBillable(projectID: label.projectID, categoryID: label.categoryID)
-                for uncovered in EntrySuggester.subtract(covered, from: bucket) {
+                for uncovered in TimeAccounting.subtract(covered, from: [bucket]) {
                     tally.add(uncovered.duration, day: stretch.day.description, groupBy: groupBy, keys: keys, billable: billable)
                 }
             }
