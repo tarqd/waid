@@ -9,32 +9,26 @@ final class DurationTests: XCTestCase {
     let t0 = TimeRange.parseDate("2026-10-09T09:00:00Z")!
     var now: Date { t0 + 2 * 3600 }
     var day: DateInterval { DateInterval(start: t0 - 9 * 3600, duration: 86400) }
-    var utc: Calendar {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")!
-        return calendar
-    }
-
     override func setUpWithError() throws {
         store = try Store(path: ":memory:")
+        store.processZone = TimeZone(identifier: "UTC")!
     }
 
     func testRunningActivityStartingAfterNowCountsAsZero() throws {
-        try store.insertActivity(start: now + 600, end: nil, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode"))
+        try store.work(ActivitySample(appName: "Xcode"), from: now + 600, to: now + 600)
         let listed = try store.activities(in: day)
-        XCTAssertEqual(listed.map { $0.duration(now: now) }, [0])
-        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now), [])
+        XCTAssertEqual(listed.map { $0.duration() }, [0])
+        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app), [])
     }
 
     func testRunningSpansCountUpToNow() throws {
         // An open observation isn't Running: it counts up to its last heartbeat.
-        let open = try store.insertActivity(start: t0, end: nil, source: Source.window, sample: ActivitySample(appName: "Xcode"))
-        try store.setEnd(activityID: open, end: now)
+        // Recorded until now and still open.
+        try store.work(ActivitySample(appName: "Xcode"), from: t0, to: now)
         let project = try store.ensureProject("Acme / Phase 2")
         try store.startTimer(projectID: project.id, now: t0 + 1800)
 
-        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now).map(\.secondsBySource),
+        XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app).map(\.secondsBySource),
                        [[Source.window: 2.0 * 3600]])
         XCTAssertEqual(try store.summary(in: .instants(day), groupBy: .project, now: now).groups.map(\.seconds), [1.5 * 3600])
         XCTAssertEqual(try store.timesheet(in: .instants(day), now: now).map(\.hours), [1.5])
@@ -96,13 +90,13 @@ final class DurationTests: XCTestCase {
         let total = 160.0 * 60 + 60
 
         for groupBy in [Store.GroupBy.project, .client, .category, .day] {
-            let summary = try store.summary(in: .instants(range), groupBy: groupBy, calendar: utc, now: now)
+            let summary = try store.summary(in: .instants(range), groupBy: groupBy, now: now)
             XCTAssertEqual(summary.seconds, total, "\(groupBy)")
             XCTAssertEqual(summary.groups.reduce(0) { $0 + $1.seconds }, total, "\(groupBy)")
         }
-        XCTAssertEqual(try store.summary(in: .instants(range), groupBy: .day, calendar: utc, now: now).groups.map(\.seconds),
+        XCTAssertEqual(try store.summary(in: .instants(range), groupBy: .day, now: now).groups.map(\.seconds),
                        [80.0 * 60, 80.0 * 60 + 60])
-        XCTAssertEqual(try store.timesheet(in: .instants(range), calendar: utc, now: now).reduce(0) { $0 + $1.hours }, total / 3600,
+        XCTAssertEqual(try store.timesheet(in: .instants(range), now: now).reduce(0) { $0 + $1.hours }, total / 3600,
                        accuracy: 1e-9)
     }
 }

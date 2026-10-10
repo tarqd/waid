@@ -30,8 +30,28 @@ extension Store {
 
     /// Entries overlapping `range`, oldest first.
     public func timeEntries(in range: DateInterval, filter: EntryFilter = EntryFilter(), now: Date = Date()) throws -> [TimeEntry] {
-        var sql = "SELECT * FROM time_entries WHERE start_ts < ? AND COALESCE(end_ts, MAX(?, start_ts)) > ?"
-        var params: [SQLBindable] = [range.end, now, range.start]
+        try timeEntries(where: "start_ts < ? AND COALESCE(end_ts, MAX(?, start_ts)) > ?",
+                        [range.end, now, range.start], filter: filter)
+    }
+
+    /// Entries `range` selects, oldest first: those with a local date in its
+    /// dates (from their stored start and end dates, a running entry open
+    /// ended), or overlapping its instants.
+    public func timeEntries(
+        in range: ReportRange, filter: EntryFilter = EntryFilter(), now: Date = Date()
+    ) throws -> [TimeEntry] {
+        switch range {
+        case .instants(let interval): return try timeEntries(in: interval, filter: filter, now: now)
+        case .localDates(let dates):
+            let lower = dates.lowerBound.description, upper = dates.upperBound.description
+            return try timeEntries(where: "start_date <= ? AND COALESCE(end_date, ?) >= ?",
+                                   [upper, upper, lower], filter: filter)
+        }
+    }
+
+    private func timeEntries(where condition: String, _ conditionParams: [SQLBindable], filter: EntryFilter) throws -> [TimeEntry] {
+        var sql = "SELECT * FROM time_entries WHERE \(condition)"
+        var params = conditionParams
         if let status = filter.status {
             sql += " AND status = ?"
             params.append(status.rawValue)
@@ -56,21 +76,10 @@ extension Store {
         return try db.query(sql + " ORDER BY start_ts", params).map { Self.timeEntry($0, catalog: catalog) }
     }
 
-    /// Entries with time on `range`'s local dates (or in its instants), oldest
-    /// first. When a local date repeats, entries in the gap between its
-    /// stretches are left out.
-    public func timeEntries(
-        in range: ReportRange, filter: EntryFilter = EntryFilter(), calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [TimeEntry] {
-        try timeEntries(overlapping: try intervals(range, calendar: calendar), filter: filter, now: now)
-    }
-
-    /// Entries overlapping any of `intervals`, oldest first.
-    func timeEntries(overlapping intervals: [DateInterval], filter: EntryFilter, now: Date) throws -> [TimeEntry] {
-        guard let hull = TimeAccounting.hull(intervals) else { return [] }
-        return try timeEntries(in: hull, filter: filter, now: now).filter {
-            TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
-        }
+    /// The pieces of `entry` that `range` counts, each on its local date in
+    /// the entry's own zone.
+    func days(of entry: TimeEntry, in range: ReportRange, now: Date) -> [(day: String, interval: DateInterval)] {
+        TimeAccounting.days(ofEntry: entry.start, end: entry.end, zone: zone(of: entry), in: range, now: now)
     }
 
     public func runningEntry() throws -> TimeEntry? {
@@ -89,7 +98,7 @@ extension Store {
     func insertEntry(_ new: NewTimeEntry, now: Date) throws -> TimeEntry {
         try validate(start: new.start, end: new.end, excluding: nil, now: now)
         let billable = try new.billable ?? catalog().defaultBillable(projectID: new.projectID, categoryID: new.categoryID)
-        let stamped = stamp(start: new.start, end: new.end, zone: nil)
+        let stamped = try stamp(start: new.start, end: new.end, zone: new.zone)
         try db.run(
             """
             INSERT INTO time_entries(start_ts, end_ts, zone, start_date, end_date, project_id, category_id, title, notes,
@@ -118,15 +127,16 @@ extension Store {
             if let tags = changes.tags { entry.tags = tags }
             if let billable = changes.billable { entry.billable = billable }
             if let status = changes.status { entry.status = status }
+            if let zone = changes.zone { entry.zone = zone.identifier }
             try validate(start: entry.start, end: entry.end, excluding: id, now: now)
             let dates = Self.localDates(start: entry.start, end: entry.end, in: zone(of: entry))
             try db.run(
                 """
-                UPDATE time_entries SET start_ts = ?, end_ts = ?, start_date = ?, end_date = ?, project_id = ?,
+                UPDATE time_entries SET start_ts = ?, end_ts = ?, zone = ?, start_date = ?, end_date = ?, project_id = ?,
                     category_id = ?, title = ?, notes = ?, tags = ?, billable = ?, status = ?, updated_ts = ?
                 WHERE id = ?
                 """,
-                [entry.start, entry.end, dates.start, dates.end, entry.projectID, entry.categoryID, entry.title,
+                [entry.start, entry.end, entry.zone, dates.start, dates.end, entry.projectID, entry.categoryID, entry.title,
                  entry.notes, Self.encodeTags(entry.tags), entry.billable, entry.status.rawValue, now, id])
             return try requireTimeEntry(id: id)
         }

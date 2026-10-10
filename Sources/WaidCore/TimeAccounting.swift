@@ -39,15 +39,99 @@ enum TimeAccounting {
         return DateInterval(start: start, end: max(start, min(spanEnd, range.end)))
     }
 
-    /// The parts of a span that fall in any of `intervals`.
-    static func clip(start: Date, end: Date?, to intervals: [DateInterval], now: Date) -> [DateInterval] {
-        intervals.map { clip(start: start, end: end, to: $0, now: now) }.filter { $0.duration > 0 }
+    /// The pieces of a time entry `range` counts, each on its own local date
+    /// in the entry's zone: split at that zone's midnights, then kept when
+    /// its date is in the range's dates, or clipped to the range's instants.
+    static func days(
+        ofEntry start: Date, end: Date?, zone: TimeZone, in range: ReportRange, now: Date
+    ) -> [(day: String, interval: DateInterval)] {
+        days(of: clip(start: start, end: end, to: allTime, now: now), in: zone).compactMap { day, interval in
+            switch range {
+            case .localDates(let dates):
+                return dates.contains(day) ? (day.description, interval) : nil
+            case .instants(let instants):
+                let clipped = clip(start: interval.start, end: interval.end, to: instants, now: now)
+                return clipped.duration > 0 ? (day.description, clipped) : nil
+            }
+        }
     }
 
-    /// Whether a span overlaps any of `intervals`, ending as `end(start:end:now:)` says.
-    static func overlaps(start: Date, end: Date?, _ intervals: [DateInterval], now: Date) -> Bool {
-        let spanEnd = self.end(start: start, end: end, now: now)
-        return intervals.contains { start < $0.end && spanEnd > $0.start }
+    /// Splits an interval at the local midnights of `zone`, each piece with its local date there.
+    static func days(of interval: DateInterval, in zone: TimeZone) -> [(day: LocalDate, interval: DateInterval)] {
+        var pieces: [(day: LocalDate, interval: DateInterval)] = []
+        var cursor = interval.start
+        while cursor < interval.end {
+            let day = LocalDate(cursor, in: zone)
+            let pieceEnd = min(day.adding(days: 1).start(in: zone), interval.end)
+            pieces.append((day, DateInterval(start: cursor, end: pieceEnd)))
+            cursor = pieceEnd
+        }
+        return pieces
+    }
+
+    /// The parts of `counted` that fall in any of `intervals`: what an
+    /// Activity contributes to a range.
+    static func clip(_ counted: [DateInterval], to intervals: [DateInterval]) -> [DateInterval] {
+        counted.flatMap { piece in intersect(piece, with: intervals) }
+    }
+
+    // MARK: Attribution
+
+    /// `intervals` in order, overlapping or touching ones merged, and gaps no
+    /// longer than `bridging` filled in.
+    static func merge(_ intervals: [DateInterval], bridging gap: TimeInterval = 0) -> [DateInterval] {
+        var merged: [DateInterval] = []
+        for interval in intervals.sorted(by: { $0.start < $1.start }) {
+            if let last = merged.last, interval.start.timeIntervalSince(last.end) <= gap {
+                merged[merged.count - 1] = DateInterval(start: last.start, end: max(last.end, interval.end))
+            } else {
+                merged.append(interval)
+            }
+        }
+        return merged
+    }
+
+    /// Present(T) (GLOSSARY.md): the active stream with gaps up to `threshold`
+    /// bridged. The active observations should cover the range of interest
+    /// widened by `threshold` on both sides, so a gap at its edge is judged
+    /// by the input on its far side.
+    static func present(active: [DateInterval], threshold: TimeInterval) -> [DateInterval] {
+        merge(active, bridging: threshold)
+    }
+
+    /// The parts of `interval` inside any of `intervals`, which are disjoint and in order.
+    static func intersect(_ interval: DateInterval, with intervals: [DateInterval]) -> [DateInterval] {
+        intervals.compactMap { other in
+            let start = max(interval.start, other.start), end = min(interval.end, other.end)
+            return start < end ? DateInterval(start: start, end: end) : nil
+        }
+    }
+
+    /// `intervals` with every part covered by `holes` cut out.
+    static func subtract(_ holes: [DateInterval], from intervals: [DateInterval]) -> [DateInterval] {
+        var pieces = intervals
+        for hole in holes {
+            pieces = pieces.flatMap { piece -> [DateInterval] in
+                guard hole.start < piece.end, hole.end > piece.start else { return [piece] }
+                var out: [DateInterval] = []
+                if hole.start > piece.start { out.append(DateInterval(start: piece.start, end: hole.start)) }
+                if hole.end < piece.end { out.append(DateInterval(start: hole.end, end: piece.end)) }
+                return out
+            }
+        }
+        return pieces
+    }
+
+    /// The attribution rule: the intervals an Activity counts. A window
+    /// observation counts its extent where you were present and the machine
+    /// wasn't locked. Any other source (an agent session) counts its full
+    /// extent: it says nothing about whether you were present, and runs
+    /// behind a locked screen.
+    static func counted(
+        extent: DateInterval, source: String, present: [DateInterval], locked: [DateInterval]
+    ) -> [DateInterval] {
+        guard source == Source.window else { return extent.duration > 0 ? [extent] : [] }
+        return subtract(locked, from: intersect(extent, with: present))
     }
 
     /// The smallest interval holding all of `intervals`, for picking spans to clip.
@@ -56,18 +140,15 @@ enum TimeAccounting {
         return DateInterval(start: first.start, end: last.end)
     }
 
-    /// The keyed pieces of `interval` under `groupBy`. Day grouping splits by
-    /// local date; every other grouping yields a single piece.
-    static func pieces(
-        of interval: DateInterval, groupBy: Store.GroupBy, keys: GroupKeys, dates: LocalDates
-    ) -> [(key: String, seconds: TimeInterval)] {
+    /// The key a span's time on local date `day` is grouped under.
+    static func key(_ groupBy: Store.GroupBy, keys: GroupKeys, day: String) -> String {
         switch groupBy {
-        case .day: return dates.split(interval)
-        case .project: return [(keys.project ?? noProject, interval.duration)]
-        case .client: return [(keys.client ?? noClient, interval.duration)]
-        case .category: return [(keys.category ?? noCategory, interval.duration)]
-        case .app: return [(keys.app ?? keys.source ?? noSource, interval.duration)]
-        case .source: return [(keys.source ?? noSource, interval.duration)]
+        case .day: return day
+        case .project: return keys.project ?? noProject
+        case .client: return keys.client ?? noClient
+        case .category: return keys.category ?? noCategory
+        case .app: return keys.app ?? keys.source ?? noSource
+        case .source: return keys.source ?? noSource
         }
     }
 
@@ -90,78 +171,12 @@ enum TimeAccounting {
             if billable { totals[key, default: Total()].billableSeconds += seconds }
         }
 
-        /// Adds the keyed pieces of `interval` under `groupBy`, each stored under `key(piece key)`.
+        /// Adds `seconds` on local date `day` under `groupBy`, stored under `key(group key)`.
         mutating func add(
-            _ interval: DateInterval, groupBy: Store.GroupBy, keys: GroupKeys, dates: LocalDates,
+            _ seconds: TimeInterval, day: String, groupBy: Store.GroupBy, keys: GroupKeys,
             billable: Bool = false, as key: (String) -> Key
         ) {
-            for (piece, seconds) in pieces(of: interval, groupBy: groupBy, keys: keys, dates: dates) {
-                add(seconds, to: key(piece), billable: billable)
-            }
-        }
-    }
-
-    /// Which Local date each instant falls on: the date where you were, per
-    /// the zone history (GLOSSARY.md, ADR-0001). Time before the first record
-    /// is in the first recorded zone; with no history at all, `fallback` is used.
-    struct LocalDates {
-        /// Zone changes, oldest first.
-        var history: [ZoneChange]
-        var fallback: TimeZone
-
-        func zone(at date: Date) -> TimeZone {
-            (history.last { $0.effectiveFrom <= date } ?? history.first)?.zone ?? fallback
-        }
-
-        /// The instants a report range covers, as disjoint intervals in order.
-        /// A run of local dates is usually one interval, but flying west can
-        /// repeat a date, and then it is more than one.
-        func intervals(_ range: ReportRange) -> [DateInterval] {
-            let dates: ClosedRange<LocalDate>
-            switch range {
-            case .instants(let interval): return [interval]
-            case .localDates(let localDates): dates = localDates
-            }
-            // Each zone holds from its change until the next; the first also covers all earlier time.
-            let zones = history.isEmpty ? [ZoneChange(zone: fallback, effectiveFrom: .distantPast)] : history
-            var result: [DateInterval] = []
-            for (i, change) in zones.enumerated() {
-                let from = i == 0 ? Date.distantPast : change.effectiveFrom
-                let until = i + 1 < zones.count ? zones[i + 1].effectiveFrom : .distantFuture
-                let start = max(from, dates.lowerBound.start(in: change.zone))
-                let end = min(until, dates.upperBound.adding(days: 1).start(in: change.zone))
-                guard start < end else { continue }
-                if let last = result.last, last.end == start {
-                    result[result.count - 1] = DateInterval(start: last.start, end: end)
-                } else {
-                    result.append(DateInterval(start: start, end: end))
-                }
-            }
-            return result
-        }
-
-        /// Splits an interval at zone changes, then each piece at its local
-        /// midnights, keyed by local date "yyyy-MM-dd".
-        func split(_ interval: DateInterval) -> [(key: String, seconds: TimeInterval)] {
-            var pieces: [(key: String, seconds: TimeInterval)] = []
-            var cursor = interval.start
-            while cursor < interval.end {
-                let zone = self.zone(at: cursor)
-                let nextChange = history.first { $0.effectiveFrom > cursor }?.effectiveFrom ?? .distantFuture
-                var calendar = Calendar(identifier: .gregorian)
-                calendar.timeZone = zone
-                let midnight = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: cursor))!
-                let pieceEnd = min(midnight, nextChange, interval.end)
-                let day = calendar.dateComponents([.year, .month, .day], from: cursor)
-                let key = String(format: "%04d-%02d-%02d", day.year!, day.month!, day.day!)
-                if let last = pieces.last, last.key == key {
-                    pieces[pieces.count - 1].seconds += pieceEnd.timeIntervalSince(cursor)
-                } else {
-                    pieces.append((key, pieceEnd.timeIntervalSince(cursor)))
-                }
-                cursor = pieceEnd
-            }
-            return pieces
+            add(seconds, to: key(TimeAccounting.key(groupBy, keys: keys, day: day)), billable: billable)
         }
     }
 
@@ -178,10 +193,10 @@ enum TimeAccounting {
 
 extension TimeAccounting.Tally where Key == String {
     mutating func add(
-        _ interval: DateInterval, groupBy: Store.GroupBy, keys: TimeAccounting.GroupKeys,
-        dates: TimeAccounting.LocalDates, billable: Bool = false
+        _ seconds: TimeInterval, day: String, groupBy: Store.GroupBy, keys: TimeAccounting.GroupKeys,
+        billable: Bool = false
     ) {
-        add(interval, groupBy: groupBy, keys: keys, dates: dates, billable: billable) { $0 }
+        add(seconds, day: day, groupBy: groupBy, keys: keys, billable: billable) { $0 }
     }
 
     /// The totals as report groups, in report order.

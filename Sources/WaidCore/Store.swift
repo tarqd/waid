@@ -26,12 +26,34 @@ public final class Store {
     }
     private var fixedZone: TimeZone?
 
+    /// The zone you were in at `instant`: the zone of the nearest observation
+    /// recorded at or before it, else `fallback` (ADR-0002). Imported agent
+    /// observations don't count: their zone came from this same chain, not
+    /// from where you were.
+    public func zone(at instant: Date, fallback: TimeZone) throws -> TimeZone {
+        let row = try db.query(
+            """
+            SELECT zone FROM observations WHERE external_id IS NULL AND start_ts <= ?
+            ORDER BY start_ts DESC, id DESC LIMIT 1
+            """, [instant]).first
+        return row?.string("zone").flatMap(TimeZone.init(identifier:)) ?? fallback
+    }
+
+    /// `calendar` set to the zone you are in at `now` (`zone(at:fallback:)`,
+    /// falling back to the process zone), for resolving "today" and the other
+    /// named ranges, and datetimes without an offset.
+    public func calendar(at now: Date, fallback calendar: Calendar = .current) throws -> Calendar {
+        var calendar = calendar
+        calendar.timeZone = try zone(at: now, fallback: processZone)
+        return calendar
+    }
+
     /// The zone a new row is stamped with, and the local dates of its first
-    /// and last instants there (see `localDates(start:end:in:)`). Today that
-    /// is `zone`, else `processZone`; ADR-0002's fallback chain (the zone of
-    /// the nearest earlier observation) belongs here.
-    func stamp(start: Date, end: Date? = nil, zone: TimeZone?) -> (zone: TimeZone, startDate: String, endDate: String?) {
-        let zone = zone ?? processZone
+    /// and last instants there (see `localDates(start:end:in:)`): `zone` if
+    /// given, else the zone at its start (`zone(at:fallback:)`), falling back
+    /// to the process zone.
+    func stamp(start: Date, end: Date? = nil, zone: TimeZone?) throws -> (zone: TimeZone, startDate: String, endDate: String?) {
+        let zone = try zone ?? self.zone(at: start, fallback: processZone)
         let dates = Self.localDates(start: start, end: end, in: zone)
         return (zone, dates.start, dates.end)
     }
@@ -190,15 +212,6 @@ public final class Store {
         ) STRICT;
         CREATE INDEX time_entries_start ON time_entries(start_ts);
 
-        -- Zone history (ADR-0001), superseded by ADR-0002; still read for
-        -- range selection until stored local dates replace it.
-        CREATE TABLE zone_history(
-            id INTEGER PRIMARY KEY,
-            zone TEXT NOT NULL,
-            effective_ts REAL NOT NULL
-        ) STRICT;
-        CREATE INDEX zone_history_effective ON zone_history(effective_ts);
-
         -- Bookkeeping and settings.
         CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
         INSERT INTO kv(key, value) VALUES('idle_threshold_seconds', '180');
@@ -258,33 +271,75 @@ public final class Store {
 
     /// Inserts a focus observation stamped with `zone` (else `processZone`)
     /// and the local date of its start there. With no `end` it is open, its
-    /// end the heartbeat at `start`, until `close(activityID:end:)`; with an
+    /// end the heartbeat at `start`, until `close(observationID:end:)`; with an
     /// `end` it is closed.
     @discardableResult
     public func insertActivity(
         start: Date, end: Date?, source: String, sample: ActivitySample = ActivitySample(),
         projectID: Int64? = nil, note: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
-        let stamped = stamp(start: start, zone: zone)
+        try insert(.focus, start: start, end: end, source: source, sample: sample,
+                   projectID: projectID, note: note, zone: zone)
+    }
+
+    /// Inserts an observation of any stream, open with no `end`, as
+    /// `insertActivity` does for focus. Only focus carries `sample`'s payload.
+    @discardableResult
+    public func insertObservation(
+        _ stream: Observation.Stream, start: Date, end: Date?, source: String = Source.window,
+        sample: ActivitySample? = nil, zone: TimeZone? = nil
+    ) throws -> Int64 {
+        try insert(stream, start: start, end: end, source: source, sample: sample, projectID: nil, note: nil, zone: zone)
+    }
+
+    private func insert(
+        _ stream: Observation.Stream, start: Date, end: Date?, source: String, sample: ActivitySample?,
+        projectID: Int64?, note: String?, zone: TimeZone?
+    ) throws -> Int64 {
+        // Stamped with the zone it was recorded in (ADR-0002), never the
+        // nearest-observation fallback `stamp` takes for a nil zone: these
+        // rows are what that fallback reads.
+        let stamped = try stamp(start: start, zone: zone ?? processZone)
         try db.run(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, open, zone, local_date,
                                      bundle_id, app_name, title, url, path, project_id, note)
-            VALUES('focus', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [source, start, end ?? start, end == nil, stamped.zone.identifier, stamped.startDate,
-             sample.bundleID, sample.appName, sample.title, sample.url, sample.path, projectID, note])
+            [stream.rawValue, source, start, end ?? start, end == nil, stamped.zone.identifier, stamped.startDate,
+             sample?.bundleID, sample?.appName, sample?.title, sample?.url, sample?.path, projectID, note])
         return db.lastInsertRowID
     }
 
+    /// Observations of `stream` overlapping `range`, oldest first.
+    public func observations(_ stream: Observation.Stream, in range: DateInterval) throws -> [Observation] {
+        try db.query(
+            """
+            SELECT id, stream, source, start_ts, end_ts, open, zone, local_date FROM observations
+            WHERE stream = ? AND start_ts < ? AND end_ts > ? ORDER BY start_ts
+            """, [stream.rawValue, range.end, range.start]
+        ).map { row in
+            Observation(
+                id: row.int("id")!, stream: Observation.Stream(rawValue: row.string("stream")!)!,
+                source: row.string("source")!, start: row.date("start_ts")!, end: row.date("end_ts")!,
+                open: row.int("open") == 1, zone: row.string("zone")!, localDate: row.string("local_date")!)
+        }
+    }
+
     /// Moves an open observation's heartbeat. A closed one can't be changed.
-    public func setEnd(activityID: Int64, end: Date) throws {
-        try db.run("UPDATE observations SET end_ts = ? WHERE id = ?", [end, activityID])
+    public func setEnd(observationID: Int64, end: Date) throws {
+        try db.run("UPDATE observations SET end_ts = ? WHERE id = ?", [end, observationID])
     }
 
     /// Closes an open observation at `end`; after this its time is fixed.
-    public func close(activityID: Int64, end: Date) throws {
-        try db.run("UPDATE observations SET end_ts = ?, open = 0 WHERE id = ? AND open = 1", [end, activityID])
+    public func close(observationID: Int64, end: Date) throws {
+        try db.run("UPDATE observations SET end_ts = ?, open = 0 WHERE id = ? AND open = 1", [end, observationID])
+    }
+
+    /// Deletes an open observation, for one that turns out to hold no time.
+    /// A closed one is evidence and stays.
+    public func discard(observationID: Int64) throws {
+        try db.run("DELETE FROM observations WHERE id = ? AND open = 1", [observationID])
     }
 
     /// Closes every observation still open at its last heartbeat, as after a
@@ -297,12 +352,13 @@ public final class Store {
     /// Inserts or refreshes a focus observation keyed by `(source,
     /// externalID)` and returns its id. Used by importers so re-running them
     /// is idempotent. A project assigned by the user is never overwritten.
+    /// With no `zone`, it takes the zone at its start (`zone(at:fallback:)`).
     @discardableResult
     public func upsertExternal(
         source: String, externalID: String, start: Date, end: Date,
         title: String?, path: String?, meta: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
-        let stamped = stamp(start: start, zone: zone)
+        let stamped = try stamp(start: start, zone: zone)
         let row = try db.query(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, zone, local_date, external_id, title, path, meta)
@@ -337,7 +393,7 @@ public final class Store {
     }
 
     public func activity(id: Int64) throws -> Activity? {
-        try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).first.map(Self.activity)
+        try attribute(try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).map(Self.activity)).first
     }
 
     /// Hides observations from queries and reports, or unhides them. Returns rows changed.
@@ -351,9 +407,9 @@ public final class Store {
     }
 
     public func latestActivity(source: String) throws -> Activity? {
-        try db.query(
+        try attribute(try db.query(
             "SELECT * FROM observations WHERE stream = 'focus' AND source = ? ORDER BY start_ts DESC LIMIT 1", [source]
-        ).first.map(Self.activity)
+        ).map(Self.activity)).first
     }
 
     public struct ActivityFilter {
@@ -369,10 +425,29 @@ public final class Store {
         public init() {}
     }
 
-    /// Spans overlapping `range`, with project, category and client resolved.
+    /// Activities whose extent overlaps `range`, with project, category and
+    /// client resolved and their counted intervals filled in.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter()) throws -> [Activity] {
-        var sql = "SELECT * FROM observations WHERE stream = 'focus' AND start_ts < ? AND end_ts > ?"
-        var params: [SQLBindable] = [range.end, range.start]
+        try activities(where: "start_ts < ? AND end_ts > ?", [range.end, range.start], filter: filter)
+    }
+
+    /// Activities `range` selects, oldest first, with project, category and
+    /// client resolved: those stamped with one of its local dates, or those
+    /// overlapping its instants.
+    public func activities(
+        in range: ReportRange, filter: ActivityFilter = ActivityFilter()
+    ) throws -> [Activity] {
+        switch range {
+        case .instants(let interval): return try activities(in: interval, filter: filter)
+        case .localDates(let dates):
+            return try activities(where: "local_date BETWEEN ? AND ?",
+                                  [dates.lowerBound.description, dates.upperBound.description], filter: filter)
+        }
+    }
+
+    private func activities(where condition: String, _ conditionParams: [SQLBindable], filter: ActivityFilter) throws -> [Activity] {
+        var sql = "SELECT * FROM observations WHERE stream = 'focus' AND \(condition)"
+        var params = conditionParams
         if !filter.includeHidden { sql += " AND hidden = 0" }
         if let sources = filter.sources, !sources.isEmpty {
             sql += " AND source IN (" + sources.map { _ in "?" }.joined(separator: ",") + ")"
@@ -397,27 +472,7 @@ public final class Store {
             result.append(activity)
             if let limit = filter.limit, result.count >= limit { break }
         }
-        return result
-    }
-
-    /// Spans with time on `range`'s local dates (or in its instants), oldest
-    /// first, with project, category and client resolved. When a local date
-    /// repeats, spans in the gap between its stretches are left out.
-    public func activities(
-        in range: ReportRange, filter: ActivityFilter = ActivityFilter(), calendar: Calendar = .current, now: Date = Date()
-    ) throws -> [Activity] {
-        try activities(overlapping: try intervals(range, calendar: calendar), filter: filter, now: now)
-    }
-
-    /// Spans overlapping any of `intervals`, oldest first.
-    func activities(overlapping intervals: [DateInterval], filter: ActivityFilter, now: Date) throws -> [Activity] {
-        guard let hull = TimeAccounting.hull(intervals) else { return [] }
-        var unlimited = filter
-        unlimited.limit = nil
-        let spans = try activities(in: hull, filter: unlimited).filter {
-            TimeAccounting.overlaps(start: $0.start, end: $0.end, intervals, now: now)
-        }
-        return filter.limit.map { Array(spans.prefix($0)) } ?? spans
+        return try attribute(result)
     }
 
     private static func activity(_ row: Row) -> Activity {
@@ -448,18 +503,15 @@ public final class Store {
     /// Evidence: activity totals per source, to help write time entries.
     /// Observed time, never claimed time, so never summed across sources.
     public func evidence(
-        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
-        calendar: Calendar = .current, now: Date = Date()
+        in range: ReportRange, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter()
     ) throws -> [EvidenceRow] {
         struct Key: Hashable { var key: String; var source: String }
-        let dates = try localDates(fallback: calendar)
-        let intervals = dates.intervals(range)
         var tally = TimeAccounting.Tally<Key>()
-        for activity in try activities(overlapping: intervals, filter: filter, now: now) {
+        for activity in try activities(in: range, filter: filter) {
             let keys = TimeAccounting.GroupKeys(project: activity.project, client: activity.client,
                                                 category: activity.category, app: activity.appName, source: activity.source)
-            for clipped in TimeAccounting.clip(start: activity.start, end: activity.end, to: intervals, now: now) {
-                tally.add(clipped, groupBy: groupBy, keys: keys, dates: dates) { Key(key: $0, source: activity.source) }
+            tally.add(activity.duration(in: range), day: activity.localDate, groupBy: groupBy, keys: keys) {
+                Key(key: $0, source: activity.source)
             }
         }
         var rows: [String: [String: Double]] = [:]

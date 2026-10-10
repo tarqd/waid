@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import WaidCore
 
-/// A span's day is its Local date: the date where you were when it happened,
-/// from the zone history (GLOSSARY.md, ADR-0001), not the zone the report runs in.
+/// A span's day is its Local date: the date where it happened, stored on the
+/// row in its own zone (GLOSSARY.md, ADR-0002), not the zone the report runs in.
 final class LocalDateTests: XCTestCase {
     var store: Store!
     let tokyo = TimeZone(identifier: "Asia/Tokyo")!
@@ -13,7 +13,7 @@ final class LocalDateTests: XCTestCase {
     /// Saturday after the trip, back in New York.
     let now = TimeRange.parseDate("2026-10-10T12:00:00-04:00")!
     var week: DateInterval { DateInterval(start: mondayTokyo - 86400, end: now) }
-    /// The machine's zone when the report runs: New York.
+    /// The machine's calendar when the report runs: New York.
     var newYorkCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = newYork
@@ -22,6 +22,7 @@ final class LocalDateTests: XCTestCase {
 
     override func setUpWithError() throws {
         store = try Store(path: ":memory:")
+        store.processZone = newYork
     }
 
     private func entry(_ start: String, _ end: String, project: Project) throws {
@@ -29,65 +30,62 @@ final class LocalDateTests: XCTestCase {
                                            projectID: project.id, origin: .manual), now: now)
     }
 
-    func testTokyoWeekKeepsItsTokyoDatesAfterFlyingHome() throws {
+    private func observe(_ start: String, _ end: String, in zone: TimeZone, project: Project? = nil) throws {
+        try store.work(ActivitySample(appName: "Xcode"), from: TimeRange.parseDate(start)!, to: TimeRange.parseDate(end)!,
+                       zone: zone, projectID: project?.id)
+    }
+
+    func testATokyoWeekIsReportedAsTokyoDatesFromNewYork() throws {
         let acme = try store.ensureProject("Acme / Phase 2")
-        try store.recordZone(tokyo, now: mondayTokyo)
         // Tuesday morning and Thursday evening in Tokyo: both straddle a New York midnight.
+        try observe("2026-10-06T08:00:00+09:00", "2026-10-06T10:00:00+09:00", in: tokyo, project: acme)
+        try observe("2026-10-08T12:00:00+09:00", "2026-10-08T15:00:00+09:00", in: tokyo, project: acme)
+        // Logged with no zone of their own: they take Tokyo from the observations.
         try entry("2026-10-06T08:00:00+09:00", "2026-10-06T10:00:00+09:00", project: acme)
         try entry("2026-10-08T12:00:00+09:00", "2026-10-08T15:00:00+09:00", project: acme)
-        try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-09T18:00:00-04:00")!)
+        // Home again.
+        try observe("2026-10-09T18:00:00-04:00", "2026-10-09T18:30:00-04:00", in: newYork)
 
-        let timesheet = try store.timesheet(in: .instants(week), calendar: newYorkCalendar, now: now)
-        XCTAssertEqual(timesheet.map(\.date), ["2026-10-06", "2026-10-08"])
-        XCTAssertEqual(timesheet.map(\.hours), [2, 3])
+        let thisWeek = try TimeRange.resolve(range: "this_week", start: nil, end: nil, now: now, calendar: newYorkCalendar)
+        for range in [thisWeek, .instants(week)] {
+            let timesheet = try store.timesheet(in: range, now: now)
+            XCTAssertEqual(timesheet.map(\.date), ["2026-10-06", "2026-10-08"], "\(range)")
+            XCTAssertEqual(timesheet.map(\.hours), [2, 3], "\(range)")
 
-        let byDay = try store.summary(in: .instants(week), groupBy: .day, calendar: newYorkCalendar, now: now).groups
-        XCTAssertEqual(byDay.map(\.key), ["2026-10-06", "2026-10-08"])
-        XCTAssertEqual(byDay.map(\.seconds), [2.0 * 3600, 3.0 * 3600])
+            let byDay = try store.summary(in: range, groupBy: .day, now: now).groups
+            XCTAssertEqual(byDay.map(\.key), ["2026-10-06", "2026-10-08"], "\(range)")
+            XCTAssertEqual(byDay.map(\.seconds), [2.0 * 3600, 3.0 * 3600], "\(range)")
+
+            let evidence = try store.evidence(in: range, groupBy: .day)
+            XCTAssertEqual(evidence.map(\.key), ["2026-10-06", "2026-10-08", "2026-10-09"], "\(range)")
+        }
+        // The same dates whatever zone the process runs in.
+        store.processZone = TimeZone(identifier: "Pacific/Honolulu")!
+        XCTAssertEqual(try store.timesheet(in: thisWeek, now: now).map(\.date), ["2026-10-06", "2026-10-08"])
     }
 
-    func testSpanCrossingAZoneChangeIsSplitAtTheChangeThenAtLocalMidnight() throws {
-        var utc = Calendar(identifier: .gregorian)
-        utc.timeZone = TimeZone(identifier: "UTC")!
-        try store.recordZone(tokyo, now: mondayTokyo)
-        // Flying home: Friday 22:00 in Tokyo until Saturday 02:00 in New York.
-        let start = TimeRange.parseDate("2026-10-09T22:00:00+09:00")!
-        let end = TimeRange.parseDate("2026-10-10T02:00:00-04:00")!
-        // Landed and noticed at Saturday 01:00 in Tokyo, which is Friday 12:00 in New York.
-        try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-10T01:00:00+09:00")!)
-        let project = try store.ensureProject("Travel")
-        try store.insertActivity(start: start, end: end, source: Source.window,
-                                 sample: ActivitySample(appName: "Mail"), projectID: project.id)
-
-        // Tokyo: Fri 22-24 (2 h) + Sat 00-01 (1 h); New York: Fri 12-24 (12 h) + Sat 00-02 (2 h).
-        let evidence = try store.evidence(in: .instants(week), groupBy: .day, calendar: utc, now: now)
-        XCTAssertEqual(evidence.map(\.key), ["2026-10-09", "2026-10-10"])
-        XCTAssertEqual(evidence.map { $0.secondsBySource[Source.window] }, [14.0 * 3600, 3.0 * 3600])
-
-        let unlogged = try store.unloggedTime(in: .instants(week), groupBy: .day, calendar: utc, now: now).groups
-        XCTAssertEqual(unlogged.map(\.key), ["2026-10-09", "2026-10-10"])
-        XCTAssertEqual(unlogged.map(\.seconds), [14.0 * 3600, 3.0 * 3600])
-    }
-
-    func testTimeBeforeTheFirstZoneRecordUsesTheFirstRecordedZone() throws {
+    func testAnEntryCrossingMidnightIsOneEntryAndTwoTimesheetRows() throws {
         let acme = try store.ensureProject("Acme / Phase 2")
-        // Logged before waid ever recorded a zone: Monday 22:00-23:00 in Tokyo is Monday 09:00 in New York.
-        try entry("2026-10-05T22:00:00+09:00", "2026-10-05T23:00:00+09:00", project: acme)
-        // Tuesday 08:00 in Tokyo, one hour after the first record: that is Monday evening in New York.
-        try entry("2026-10-06T08:00:00+09:00", "2026-10-06T09:00:00+09:00", project: acme)
-        try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-06T07:00:00+09:00")!)
+        // Tuesday 23:00 to Wednesday 01:00 in Tokyo, logged in Tokyo's zone from New York.
+        var late = NewTimeEntry(start: TimeRange.parseDate("2026-10-06T23:00:00+09:00")!,
+                                end: TimeRange.parseDate("2026-10-07T01:30:00+09:00")!, projectID: acme.id,
+                                title: "cutover", origin: .manual)
+        late.zone = tokyo
+        try store.createEntry(late, now: now)
+        let range = ReportRange.localDates(LocalDate("2026-10-06")!...LocalDate("2026-10-07")!)
 
-        var tokyoCalendar = Calendar(identifier: .gregorian)
-        tokyoCalendar.timeZone = tokyo
-        let timesheet = try store.timesheet(in: .instants(week), calendar: tokyoCalendar, now: now)
-        XCTAssertEqual(timesheet.map(\.date), ["2026-10-05"], "both in New York, the first recorded zone")
-        XCTAssertEqual(timesheet.map(\.hours), [2])
-    }
+        XCTAssertEqual(try store.timeEntries(in: range, now: now).count, 1)
+        let byDay = try store.summary(in: range, groupBy: .day, now: now)
+        XCTAssertEqual(byDay.groups.map(\.key), ["2026-10-06", "2026-10-07"])
+        XCTAssertEqual(byDay.groups.map(\.seconds), [3600, 5400])
+        let timesheet = try store.timesheet(in: range, now: now)
+        XCTAssertEqual(timesheet.map(\.date), ["2026-10-06", "2026-10-07"])
+        XCTAssertEqual(timesheet.map(\.hours), [1, 1.5])
+        XCTAssertEqual(timesheet.map(\.notes), [["cutover"], ["cutover"]])
 
-    func testWithoutAnyZoneHistoryTheCalendarZoneIsUsed() throws {
-        let acme = try store.ensureProject("Acme / Phase 2")
-        try entry("2026-10-06T08:00:00+09:00", "2026-10-06T09:00:00+09:00", project: acme)
-
-        XCTAssertEqual(try store.timesheet(in: .instants(week), calendar: newYorkCalendar, now: now).map(\.date), ["2026-10-05"])
+        // Asking for Wednesday alone counts only Wednesday's part.
+        let wednesday = ReportRange.localDates(LocalDate("2026-10-07")!...LocalDate("2026-10-07")!)
+        XCTAssertEqual(try store.timesheet(in: wednesday, now: now).map(\.hours), [1.5])
+        XCTAssertEqual(try store.summary(in: wednesday, groupBy: .project, now: now).seconds, 5400)
     }
 }

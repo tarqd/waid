@@ -49,7 +49,8 @@ Or in any MCP client config:
 
 | Tool | What it does |
 |---|---|
-| `get_status` | Current activity, running timer, Unlogged time today (and how much is billable) |
+| `get_status` | Current activity, running timer, Unlogged time today (and how much is billable), idle threshold |
+| `set_idle_threshold` | Read or change the idle threshold (seconds, 0 to 86400); changing it re-reads every past day |
 | `query_activity` | Observed activities in a range, filterable by project/source/text |
 | `summarize` | Summary: claimed time from time entries, with billable minutes and utilization, by client / project / category / day |
 | `evidence` | Evidence for claiming time, never claimed time: `kind=activities` (observed minutes per source, never summed across sources; also by app / source) or `kind=unlogged` (work a suggestion would offer to claim that no confirmed entry covers, with billable minutes) |
@@ -71,7 +72,7 @@ Or in any MCP client config:
 
 Entries an agent writes record it as the author (`agent:claude-code`), so you can see and undo them.
 
-Ranges are local dates where you were, per the zone history (weeks start Monday); timestamps with a time of day are exact instants.
+Ranges are local dates, matched against the date stored on each activity and entry where it happened (weeks start Monday); timestamps with a time of day are exact instants. A date range is echoed back as `start` and `end` dates, both inclusive.
 
 **Breaking change:** `summarize` used to default to activity totals and took a `kind`. It now reports time entries only (a Summary); activity totals and Unlogged time moved to the `evidence` tool. Likewise `waid report` now shows the Summary by default, with `--evidence` and `--unlogged` for the others (`--entries` is gone). `suggest_time_entries` returns each draft's top titles and apps as `contributors` (formerly `evidence`), since Evidence now names activity totals.
 
@@ -84,6 +85,7 @@ waid budgets
 waid start ["Client / Project" | internal-project] [TITLE] [--category NAME]
 waid stop
 waid status
+waid settings idle-threshold [SECONDS]   # print, or set (0 to 86400)
 waid import [--full]
 waid db-path
 ```

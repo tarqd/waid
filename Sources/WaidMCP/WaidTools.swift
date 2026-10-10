@@ -49,7 +49,7 @@ public enum WaidTools {
         let rangeProps: [String: JSONValue] = [
             "range": ["type": "string", "enum": .array(TimeRange.names.map { .string($0) }),
                       "description": """
-                        Named range of local dates (the date where you were, per the zone history); weeks start Monday. \
+                        Named range of local dates, matched against the date each activity and entry is stamped with where it happened; weeks start Monday. \
                         Takes precedence over start/end. Defaults to today.
                         """],
             "start": ["type": "string", "description": "ISO 8601 date (selects by local date) or datetime (an exact instant, inclusive)."],
@@ -83,6 +83,8 @@ public enum WaidTools {
             "notes": ["type": ["string", "null"], "description": "Billing narrative; shows up in timesheets."],
             "tags": ["type": "array", "items": ["type": "string"]],
             "billable": ["type": "boolean", "description": "Omit to derive from project and category."],
+            "zone": ["type": "string",
+                     "description": "IANA time zone the work happened in, e.g. \"Asia/Tokyo\"; sets the entry's local dates. Omit to use the zone the user was in at its start. Pass it when logging work done elsewhere."],
         ]
         let projectFields: [String: JSONValue] = [
             "client": ["type": ["string", "null"], "description": "Client name (created if missing). Omit or null for an internal project."],
@@ -118,6 +120,15 @@ public enum WaidTools {
             guard let s = try a.string(key) else { return nil }
             guard let d = TimeRange.parseDate(s) else { throw ToolError("can't parse \(key) \"\(s)\" as an ISO 8601 date/datetime") }
             return d
+        }
+        /// An IANA zone identifier such as "Asia/Tokyo"; abbreviations and
+        /// offsets are rejected.
+        func zone(_ a: Arguments) throws -> TimeZone? {
+            guard let id = try a.string("zone") else { return nil }
+            guard TimeZone.knownTimeZoneIdentifiers.contains(id) || id == "UTC", let zone = TimeZone(identifier: id) else {
+                throw ToolError("zone \"\(id)\" is not an IANA time zone identifier like \"Asia/Tokyo\"")
+            }
+            return zone
         }
         func requiredID(_ a: Arguments) throws -> Int64 {
             guard let id = try a.int("id") else { throw ToolError("missing required argument \"id\"") }
@@ -194,7 +205,7 @@ public enum WaidTools {
 
             Tool(
                 name: "get_status",
-                description: "What the user is doing right now: current frontmost activity, running timer, today's unlogged minutes (and how many are billable), and when agent sessions were last imported.",
+                description: "What the user is doing right now: current frontmost activity, running timer, today's unlogged minutes (and how many are billable), when agent sessions were last imported, and the idle threshold in seconds (the longest pause in input that still counts as present).",
                 inputSchema: schema([:]), readOnly: true
             ) { _, _ in
                 let latest = try store.latestActivity(source: Source.window)
@@ -206,12 +217,29 @@ public enum WaidTools {
                 let unlogged = try store.unloggedTime(in: try named("today"), groupBy: .project, now: now())
                 return Status(
                     now: now(),
-                    current: current.map { ActivityView($0, now: now()) },
+                    current: current.map { ActivityView($0) },
                     runningTimer: try store.runningEntry().map { EntryView($0, now: now()) },
                     unloggedTodayMinutes: minutes(unlogged.seconds),
                     unloggedTodayBillableMinutes: minutes(unlogged.billableSeconds),
                     lastAgentImport: try store.value(forKey: "ingest.claude-code.last_run")
-                        .flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
+                        .flatMap(Double.init).map(Date.init(timeIntervalSince1970:)),
+                    idleThresholdSeconds: try store.idleThreshold())
+            },
+
+            Tool(
+                name: "set_idle_threshold",
+                description: """
+                    Read or change the idle threshold: the longest pause in input, in seconds, that still counts as \
+                    present. Default 180. Changing it re-reads every past day (evidence, suggestions, unlogged time) \
+                    without rewriting anything. Without seconds, returns the current value.
+                    """,
+                inputSchema: schema([
+                    "seconds": ["type": "integer", "minimum": 0, "maximum": .number(Store.idleThresholdLimits.upperBound),
+                                "description": "New threshold, 0 to 86400 (24 hours)."],
+                ])
+            ) { a, _ in
+                if let seconds = try a.int("seconds") { try store.setIdleThreshold(TimeInterval(seconds)) }
+                return IdleThresholdView(idleThresholdSeconds: try store.idleThreshold())
             },
 
             // MARK: Activities
@@ -227,7 +255,7 @@ public enum WaidTools {
             ) { a, _ in
                 var f = try activityFilter(a)
                 f.limit = try a.int("limit") ?? 200
-                return try store.activities(in: try range(a), filter: f, now: now()).map { ActivityView($0, now: now()) }
+                return try store.activities(in: try range(a), filter: f).map { ActivityView($0) }
             },
 
             Tool(
@@ -253,7 +281,7 @@ public enum WaidTools {
                 let selection = try range(a)
                 let summary = try store.summary(in: selection, groupBy: groupBy, filter: try entryFilter(a),
                                                 includeDrafts: try a.bool("include_drafts") ?? false, now: now())
-                return SummaryView(bounds: try store.bounds(of: selection), groupBy: groupBy.rawValue, summary: summary)
+                return SummaryView(range: selection, groupBy: groupBy.rawValue, summary: summary)
             },
 
             Tool(
@@ -284,13 +312,13 @@ public enum WaidTools {
                 let totals: EvidenceView.Totals
                 switch try a.string("kind") ?? "activities" {
                 case "activities":
-                    totals = .activities(try store.evidence(in: selection, groupBy: groupBy, filter: try activityFilter(a), now: now()))
+                    totals = .activities(try store.evidence(in: selection, groupBy: groupBy, filter: try activityFilter(a)))
                 case "unlogged":
                     totals = .unlogged(try store.unloggedTime(in: selection, groupBy: groupBy, filter: try activityFilter(a), now: now()))
                 case let kind:
                     throw ToolError("unknown kind \"\(kind)\"; use activities or unlogged (time entries are in summarize)")
                 }
-                return EvidenceView(bounds: try store.bounds(of: selection), groupBy: groupBy.rawValue, totals: totals)
+                return EvidenceView(range: selection, groupBy: groupBy.rawValue, totals: totals)
             },
 
             Tool(
@@ -304,7 +332,8 @@ public enum WaidTools {
                 var f = Store.ActivityFilter()
                 f.uncategorizedOnly = true
                 var groups: [String: UncategorizedGroup] = [:]
-                for activity in try store.activities(in: try range(a), filter: f, now: now()) {
+                let selection = try range(a)
+                for activity in try store.activities(in: selection, filter: f) {
                     let (field, value): (String, String)
                     if let host = activity.url.flatMap({ URL(string: $0)?.host }) {
                         (field, value) = ("url", host)
@@ -318,7 +347,8 @@ public enum WaidTools {
                     var group = groups[key] ?? UncategorizedGroup(
                         source: activity.source, field: field, value: value, app: activity.appName,
                         client: activity.client, category: activity.category, minutes: 0, examples: [])
-                    group.minutes += activity.duration(now: now()) / 60
+                    // Each activity's counted time in the range.
+                    group.minutes += activity.duration(in: selection) / 60
                     if let title = activity.title, group.examples.count < 5, !group.examples.contains(title) {
                         group.examples.append(title)
                     }
@@ -474,14 +504,14 @@ public enum WaidTools {
                 guard let op = RuleOp(rawValue: opName) else { throw ToolError("unknown op \"\(opName)\"") }
                 let rule = try store.addRule(projectID: project, categoryID: category, field: field, op: op,
                                              pattern: try a.requiredString("pattern"), priority: try a.int("priority") ?? 0)
-                let recent = try store.activities(in: try named("last_30_days"), now: now())
+                let recent = try store.activities(in: try named("last_30_days"))
                 let engine = RuleEngine(rules: try store.rules())
                 let decided = recent.filter { activity in
                     (project != nil && activity.assignedProjectID == nil && engine.projectRule(for: activity)?.id == rule.id)
                         || (category != nil && activity.assignedCategoryID == nil && engine.categoryRule(for: activity)?.id == rule.id)
                 }
                 return CreatedRule(rule: RuleView(rule, catalog: try store.catalog()), matchedLast30Days: decided.count,
-                                   minutesLast30Days: minutes(decided.reduce(0) { $0 + $1.duration(now: now()) }))
+                                   minutesLast30Days: minutes(decided.reduce(0) { $0 + $1.duration() }))
             },
 
             Tool(
@@ -531,6 +561,7 @@ public enum WaidTools {
                 new.billable = try a.bool("billable")
                 new.author = ctx.author
                 new.status = try status(a) ?? .confirmed
+                new.zone = try zone(a)
                 return EntryView(try store.createEntry(new, now: now()), now: now())
             },
 
@@ -554,6 +585,7 @@ public enum WaidTools {
                 changes.tags = try a.strings("tags")
                 changes.billable = try a.bool("billable")
                 changes.status = try status(a)
+                changes.zone = try zone(a)
                 return EntryView(try store.updateEntry(id: try requiredID(a), changes, now: now()), now: now())
             },
 
@@ -684,7 +716,7 @@ public enum WaidTools {
                 }
                 let resolved = try store.activities(in: DateInterval(start: start, end: max(end, start + 1)))
                     .first { $0.id == id }
-                return ActivityView(try resolved ?? store.activity(id: id)!, now: now())
+                return ActivityView(try resolved ?? store.activity(id: id)!)
             },
 
             Tool(
@@ -724,18 +756,22 @@ struct ActivityView: Encodable {
     var projectFrom: String?
     var category: String?
     var categoryFrom: String?
+    var zone: String
+    var localDate: String
 
-    init(_ a: Activity, now: Date) {
-        id = a.id; start = a.start; end = a.end; minutes = WaidTools.minutes(a.duration(now: now))
+    init(_ a: Activity) {
+        id = a.id; start = a.start; end = a.end; minutes = WaidTools.minutes(a.duration())
         source = a.source; app = a.appName; bundleID = a.bundleID; title = a.title; url = a.url; path = a.path
         client = a.client; project = a.project; category = a.category
         projectFrom = a.assignedProjectID != nil ? "assigned" : (a.projectID != nil ? "rule" : nil)
         categoryFrom = a.assignedCategoryID != nil ? "assigned" : (a.categoryID != nil ? "rule" : nil)
+        zone = a.zone; localDate = a.localDate
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, start, end, minutes, source, app, title, url, path, client, project, category
+        case id, start, end, minutes, source, app, title, url, path, client, project, category, zone
         case bundleID = "bundle_id", projectFrom = "project_from", categoryFrom = "category_from"
+        case localDate = "local_date"
     }
 }
 
@@ -754,12 +790,21 @@ struct EntryView: Encodable {
     var origin: String
     var author: String
     var status: String
+    var zone: String
+    var startDate: String
+    var endDate: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, start, end, minutes, client, project, category, title, notes, tags, billable, origin, author, status, zone
+        case startDate = "start_date", endDate = "end_date"
+    }
 
     init(_ e: TimeEntry, now: Date) {
         id = e.id; start = e.start; end = e.end; minutes = WaidTools.minutes(e.duration(now: now))
         client = e.client; project = e.project; category = e.category
         title = e.title; notes = e.notes; tags = e.tags; billable = e.billable
         origin = e.origin.rawValue; author = e.author; status = e.status.rawValue
+        zone = e.zone; startDate = e.startDate; endDate = e.endDate
     }
 }
 
@@ -770,11 +815,17 @@ struct Status: Encodable {
     var unloggedTodayMinutes: Double
     var unloggedTodayBillableMinutes: Double
     var lastAgentImport: Date?
+    var idleThresholdSeconds: TimeInterval
     enum CodingKeys: String, CodingKey {
         case now, current, runningTimer = "running_timer", unloggedTodayMinutes = "unlogged_today_minutes"
         case unloggedTodayBillableMinutes = "unlogged_today_billable_minutes"
-        case lastAgentImport = "last_agent_import"
+        case lastAgentImport = "last_agent_import", idleThresholdSeconds = "idle_threshold_seconds"
     }
+}
+
+struct IdleThresholdView: Encodable {
+    var idleThresholdSeconds: TimeInterval
+    enum CodingKeys: String, CodingKey { case idleThresholdSeconds = "idle_threshold_seconds" }
 }
 
 struct TimeGroupView: Encodable {
@@ -790,11 +841,27 @@ struct TimeGroupView: Encodable {
     }
 }
 
+/// The range a report covers, echoed back as `start` and `end`: its first and
+/// last local dates ("yyyy-MM-dd", both inclusive), or its instants (end
+/// exclusive), as the caller gave it.
+struct RangeView {
+    var range: ReportRange
+
+    func encode<Key: CodingKey>(into c: inout KeyedEncodingContainer<Key>, start: Key, end: Key) throws {
+        switch range {
+        case .localDates(let dates):
+            try c.encode(dates.lowerBound.description, forKey: start)
+            try c.encode(dates.upperBound.description, forKey: end)
+        case .instants(let interval):
+            try c.encode(interval.start, forKey: start)
+            try c.encode(interval.end, forKey: end)
+        }
+    }
+}
+
 /// A Summary: claimed time from time entries.
 struct SummaryView: Encodable {
-    /// The range's first and last instants; nil when it covers none.
-    var start: Date?
-    var end: Date?
+    var range: RangeView
     var groupBy: String
     var groups: [TimeGroupView]
     var totalMinutes: Double
@@ -802,12 +869,22 @@ struct SummaryView: Encodable {
     /// Billable / total, or nil with no time.
     var utilization: Double?
 
-    init(bounds: DateInterval?, groupBy: String, summary: Store.Summary) {
-        start = bounds?.start; end = bounds?.end; self.groupBy = groupBy
+    init(range: ReportRange, groupBy: String, summary: Store.Summary) {
+        self.range = RangeView(range: range); self.groupBy = groupBy
         groups = summary.groups.map(TimeGroupView.init)
         totalMinutes = WaidTools.minutes(summary.seconds)
         billableMinutes = WaidTools.minutes(summary.billableSeconds)
         utilization = summary.utilization.map { ($0 * 1000).rounded() / 1000 }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try range.encode(into: &c, start: .start, end: .end)
+        try c.encode(groupBy, forKey: .groupBy)
+        try c.encode(groups, forKey: .groups)
+        try c.encode(totalMinutes, forKey: .totalMinutes)
+        try c.encode(billableMinutes, forKey: .billableMinutes)
+        try c.encodeIfPresent(utilization, forKey: .utilization)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -830,15 +907,13 @@ struct EvidenceView: Encodable {
         enum CodingKeys: String, CodingKey { case key, minutesBySource = "minutes_by_source" }
     }
 
-    /// The range's first and last instants; nil when it covers none.
-    var bounds: DateInterval?
+    var range: ReportRange
     var groupBy: String
     var totals: Totals
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encodeIfPresent(bounds?.start, forKey: .start)
-        try c.encodeIfPresent(bounds?.end, forKey: .end)
+        try RangeView(range: range).encode(into: &c, start: .start, end: .end)
         try c.encode(groupBy, forKey: .groupBy)
         switch totals {
         case .activities(let rows):

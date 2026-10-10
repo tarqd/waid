@@ -32,6 +32,27 @@ public enum Source {
     public static func agent(_ name: String) -> String { agentPrefix + name }
 }
 
+/// A stretch of one stream as the daemon saw it (GLOSSARY.md), without the
+/// focus payload: `Activity` is the focus view with that payload resolved.
+public struct Observation: Codable, Equatable, Sendable {
+    /// What an observation says: what was in front, when input was seen, or
+    /// when the machine was locked or asleep.
+    public enum Stream: String, Codable, CaseIterable, Sendable {
+        case focus, active, locked
+    }
+
+    public var id: Int64
+    public var stream: Stream
+    public var source: String
+    public var start: Date
+    /// Its last heartbeat while open.
+    public var end: Date
+    public var open: Bool
+    /// The IANA zone it happened in, and its local date there ("yyyy-MM-dd").
+    public var zone: String
+    public var localDate: String
+}
+
 /// A focus observation: a window in front, an agent session. Activities are
 /// evidence; they are categorized but not edited.
 public struct Activity: Codable, Equatable, Sendable {
@@ -68,8 +89,31 @@ public struct Activity: Codable, Equatable, Sendable {
     public var clientID: Int64?
     public var client: String?
 
-    public func duration(now: Date = Date()) -> TimeInterval {
-        TimeAccounting.end(start: start, end: end, now: now).timeIntervalSince(start)
+    /// The parts of its extent (`start` to `end`) that count, by the
+    /// attribution rule: for a window activity, the time you were present and
+    /// not locked; for an agent session, all of it. Disjoint, in order.
+    /// Filled in by queries.
+    public var counted: [DateInterval] = []
+
+    /// The time it counts: the sum of `counted`. An open activity counts up
+    /// to its last heartbeat.
+    public func duration() -> TimeInterval {
+        counted.reduce(0) { $0 + $1.duration }
+    }
+
+    /// The time it counts within `range`.
+    public func duration(in range: DateInterval) -> TimeInterval {
+        TimeAccounting.clip(counted, to: [range]).reduce(0) { $0 + $1.duration }
+    }
+
+    /// The time it counts in a report range: all of it on a date range,
+    /// which selects it by its stored local date, else the part within the
+    /// range's instants.
+    public func duration(in range: ReportRange) -> TimeInterval {
+        switch range {
+        case .localDates: return duration()
+        case .instants(let interval): return duration(in: interval)
+        }
     }
 }
 
@@ -226,6 +270,8 @@ public struct NewTimeEntry: Sendable {
     public var origin: EntryOrigin
     public var author = "user"
     public var status = EntryStatus.confirmed
+    /// Where it happened. nil: the zone at its start (`Store.zone(at:fallback:)`).
+    public var zone: TimeZone?
 
     public init(
         start: Date, end: Date?, projectID: Int64? = nil, categoryID: Int64? = nil, title: String? = nil,
@@ -253,5 +299,7 @@ public struct TimeEntryChanges: Sendable {
     public var tags: [String]?
     public var billable: Bool?
     public var status: EntryStatus?
+    /// Moves the entry to another zone; its local dates follow.
+    public var zone: TimeZone?
     public init() {}
 }

@@ -54,11 +54,11 @@ final class MCPServerTests: XCTestCase {
 
     func testCategorizeFlow() throws {
         let t = now.addingTimeInterval(-3600)
-        try store.insertActivity(start: t, end: t + 1200, source: Source.window,
-                                 sample: ActivitySample(bundleID: "com.apple.Safari", appName: "Safari",
-                                                        title: "waid PR", url: "https://github.com/tarqd/waid/pull/2"))
-        try store.insertActivity(start: t + 1200, end: t + 1800, source: Source.window,
-                                 sample: ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh"))
+        try store.work(ActivitySample(bundleID: "com.apple.Safari", appName: "Safari",
+                                      title: "waid PR", url: "https://github.com/tarqd/waid/pull/2"),
+                       from: t, to: t + 1200)
+        try store.work(ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh"),
+                       from: t + 1200, to: t + 1800)
 
         let top = try call("top_uncategorized", ["range": "today"])
         guard case .array(let groups) = top else { return XCTFail("\(top)") }
@@ -90,6 +90,57 @@ final class MCPServerTests: XCTestCase {
         _ = try call("evidence", ["kind": "entries"], expectError: true)
     }
 
+    func testStatusShowsTheDefaultIdleThresholdOnANewDatabase() throws {
+        XCTAssertEqual(try call("get_status")["idle_threshold_seconds"], 180)
+    }
+
+    func testSettingTheIdleThresholdReReadsPastEvidence() throws {
+        // Yesterday: 30 minutes of input, 10 reading without input, 20 more of input.
+        let t = TimeRange.parseDate("2026-10-08T13:00:00Z")!
+        let recorder = ActivityRecorder(store: store, interval: 60)
+        for minute in stride(from: 0.0, through: 60, by: 1) {
+            var editor = ActivitySample(appName: "Xcode", title: "main.swift")
+            if minute > 30 && minute < 40 { editor.idleSeconds = (minute - 30) * 60 }
+            try recorder.record(.sample(editor), at: t + minute * 60)
+        }
+        let yesterday: JSONValue = ["start": "2026-10-08T12:00:00Z", "end": "2026-10-08T15:00:00Z", "group_by": "app"]
+        func minutes() throws -> JSONValue? {
+            guard case .array(let rows)? = try call("evidence", yesterday)["groups"] else { return nil }
+            return rows.first?["minutes_by_source"]?["window"]
+        }
+
+        XCTAssertEqual(try minutes(), 50, "the 10-minute pause is longer than the default 3 minutes")
+        XCTAssertEqual(try call("set_idle_threshold", ["seconds": 900])["idle_threshold_seconds"], 900)
+        XCTAssertEqual(try minutes(), 60, "the pause is now bridged, with no observation rewritten")
+        XCTAssertEqual(try call("get_status")["idle_threshold_seconds"], 900)
+    }
+
+    func testAnIdleThresholdOutOfRangeIsRejectedNamingTheLimit() throws {
+        XCTAssertTrue(try call("set_idle_threshold", ["seconds": -1], expectError: true).stringValue?.contains("below 0") == true)
+        XCTAssertTrue(try call("set_idle_threshold", ["seconds": 86_401], expectError: true).stringValue?.contains("86400") == true)
+        XCTAssertTrue(try call("set_idle_threshold", ["seconds": .number(1.5)], expectError: true).stringValue?.contains("integer") == true)
+        XCTAssertEqual(try call("set_idle_threshold")["idle_threshold_seconds"], 180, "unchanged, and readable without seconds")
+    }
+
+    func testTopUncategorizedCountsPresentTimeInTheRange() throws {
+        let t = TimeRange.parseDate("2026-10-09T13:00:00Z")!
+        let terminal = ActivitySample(bundleID: "com.apple.Terminal", appName: "Terminal", title: "zsh")
+        try store.work(terminal, from: t, to: t + 1800)
+        // The same window stays in front through 20 minutes without input, then 10 more of input.
+        let recorder = ActivityRecorder(store: store, interval: 60)
+        for minute in stride(from: 31.0, to: 50, by: 1) {
+            var idle = terminal
+            idle.idleSeconds = (minute - 30) * 60
+            try recorder.record(.sample(idle), at: t + minute * 60)
+        }
+        try store.work(terminal, from: t + 3000, to: t + 3600)
+
+        let top = try call("top_uncategorized", ["start": "2026-10-09T13:10:00Z", "end": "2026-10-09T15:00:00Z"])
+        guard case .array(let groups) = top else { return XCTFail("\(top)") }
+        XCTAssertEqual(groups.map { $0["value"] }, ["com.apple.Terminal"])
+        XCTAssertEqual(groups.first?["minutes"], 30, "20 present minutes in the range before the pause, 10 after")
+    }
+
     func testTimersAndAgentWork() throws {
         let started = try call("start_timer", ["project": "Writing", "title": "blog"])
         XCTAssertEqual(started["started"]?["project"], "Writing")
@@ -114,11 +165,86 @@ final class MCPServerTests: XCTestCase {
         _ = try call("record_agent_work", ["agent": "bad name!", "start": "2026-10-09", "title": "x"], expectError: true)
     }
 
+    func testTimeEntriesTakeAZoneOrTheZoneWhereYouWere() throws {
+        store.processZone = TimeZone(identifier: "America/New_York")!
+        // 22:00Z on the 9th is the 10th in Tokyo and still the 9th in New York.
+        let early = TimeRange.parseDate("2026-10-09T13:00:00Z")!
+        try store.work(ActivitySample(appName: "Xcode"),
+                       from: early, to: early + 600, zone: TimeZone(identifier: "Asia/Tokyo")!)
+        now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
+
+        let unzoned = try call("create_time_entry", ["start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z"])
+        XCTAssertEqual(unzoned["zone"], "Asia/Tokyo")
+        XCTAssertEqual(unzoned["start_date"], "2026-10-10")
+
+        let zoned = try call("create_time_entry", ["start": "2026-10-09T23:00:00Z", "end": "2026-10-09T23:30:00Z",
+                                                   "zone": "America/New_York"])
+        XCTAssertEqual(zoned["zone"], "America/New_York")
+        XCTAssertEqual(zoned["start_date"], "2026-10-09")
+        XCTAssertEqual(zoned["end_date"], "2026-10-09")
+
+        let moved = try call("update_time_entry", ["id": zoned["id"]!, "zone": "Asia/Tokyo"])
+        XCTAssertEqual(moved["zone"], "Asia/Tokyo")
+        XCTAssertEqual(moved["start_date"], "2026-10-10")
+
+        for tool in ["create_time_entry", "update_time_entry"] {
+            let error = try call(tool, ["id": zoned["id"]!, "start": "2026-10-09T20:00:00Z", "end": "2026-10-09T20:30:00Z",
+                                        "zone": "Mars/Olympus_Mons"], expectError: true)
+            XCTAssertTrue(error.stringValue?.contains("zone") == true, "names the argument: \(error)")
+        }
+    }
+
+    func testAnEntryWithNoObservationsTakesTheProcessZone() throws {
+        store.processZone = TimeZone(identifier: "America/New_York")!
+        now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
+        let entry = try call("create_time_entry", ["start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z"])
+        XCTAssertEqual(entry["zone"], "America/New_York")
+        XCTAssertEqual(entry["start_date"], "2026-10-09")
+    }
+
+    func testAgentWorkTakesTheZoneWhereYouWereAndStaysIdempotent() throws {
+        store.processZone = TimeZone(identifier: "UTC")!
+        let early = TimeRange.parseDate("2026-10-09T13:00:00Z")!
+        try store.work(ActivitySample(appName: "Xcode"),
+                       from: early, to: early + 600, zone: TimeZone(identifier: "Asia/Tokyo")!)
+        now = TimeRange.parseDate("2026-10-10T03:00:00Z")!
+
+        let args: JSONValue = ["agent": "codex", "start": "2026-10-09T22:00:00Z", "end": "2026-10-09T22:30:00Z",
+                               "title": "refactor", "external_id": "run-1"]
+        let first = try call("record_agent_work", args)
+        let again = try call("record_agent_work", args)
+        XCTAssertEqual(again["id"], first["id"])
+        XCTAssertEqual(again["zone"], "Asia/Tokyo")
+        XCTAssertEqual(again["local_date"], "2026-10-10")
+
+        // Two sessions' transcripts with UTC timestamps.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let projectDir = dir.appendingPathComponent("projects/-src-waid")
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("""
+            {"type":"user","sessionId":"s1","cwd":"/src/waid","timestamp":"2026-10-09T23:00:00Z","message":{"role":"user","content":"fix"}}
+            {"type":"assistant","sessionId":"s1","cwd":"/src/waid","timestamp":"2026-10-09T23:10:00Z","message":{"role":"assistant","content":"ok"}}
+            """.utf8).write(to: projectDir.appendingPathComponent("s1.jsonl"))
+        setenv("CLAUDE_CONFIG_DIR", dir.path, 1)
+        defer { unsetenv("CLAUDE_CONFIG_DIR") }
+
+        XCTAssertEqual(try call("import_agent_sessions")["segmentsUpserted"], 1)
+        XCTAssertEqual(try call("import_agent_sessions", ["full": true])["segmentsUpserted"], 1)
+
+        let imported = try call("query_activity", ["start": "2026-10-09T00:00:00Z", "end": "2026-10-11T00:00:00Z",
+                                                   "sources": ["agent:claude-code"]])
+        guard case .array(let spans) = imported else { return XCTFail("\(imported)") }
+        XCTAssertEqual(spans.count, 1, "re-importing doesn't duplicate")
+        XCTAssertEqual(spans.first?["zone"], "Asia/Tokyo")
+        XCTAssertEqual(spans.first?["local_date"], "2026-10-10")
+    }
+
     func testSuggestEditConfirmFlowAttributesAgent() throws {
         _ = try send(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Claude Code","version":"2"}}}"#)
         let t = TimeRange.parseDate("2026-10-09T09:00:00Z")!
-        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "Store.swift", path: "/src/waid/Store.swift"))
+        try store.work(ActivitySample(appName: "Xcode", title: "Store.swift", path: "/src/waid/Store.swift"),
+                       from: t, to: t + 3600)
         _ = try call("create_rule", ["project": "waid", "field": "path", "op": "prefix", "pattern": "/src/waid"])
 
         let unlogged = try call("evidence", ["range": "today", "kind": "unlogged"])
@@ -202,10 +328,10 @@ final class MCPServerTests: XCTestCase {
         _ = try call("create_project", ["name": "Phase 2", "client": "Acme"])
         _ = try call("create_rule", ["project": "Acme / Phase 2", "field": "title", "op": "contains", "pattern": "acme"])
         _ = try call("create_rule", ["category": "Presales", "field": "app_name", "op": "equals", "pattern": "Keynote"])
-        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme-integration"))
-        try store.insertActivity(start: t + 3600, end: t + 5400, source: Source.window,
-                                 sample: ActivitySample(appName: "Keynote", title: "Acme pitch"))
+        try store.work(ActivitySample(appName: "Xcode", title: "acme-integration"),
+                       from: t, to: t + 3600)
+        try store.work(ActivitySample(appName: "Keynote", title: "Acme pitch"),
+                       from: t + 3600, to: t + 5400)
 
         let unlogged = try call("evidence", ["range": "today", "kind": "unlogged"])
         XCTAssertEqual(unlogged["groups"], [["key": "Acme / Phase 2", "minutes": 90, "billable_minutes": 60]])
@@ -217,8 +343,10 @@ final class MCPServerTests: XCTestCase {
     }
 
     func testRangesAreLocalDatesWhereYouAre() throws {
-        // now is Saturday 00:00 in Tokyo, still Friday in UTC.
-        try store.recordZone(TimeZone(identifier: "Asia/Tokyo")!, now: now - 7 * 86400)
+        // now is Saturday 00:00 in Tokyo, still Friday in UTC; the daemon last recorded you in Tokyo.
+        store.processZone = TimeZone(identifier: "America/New_York")!
+        try store.insertActivity(start: now - 7 * 86400, end: now - 7 * 86400 + 60, source: Source.window,
+                                 zone: TimeZone(identifier: "Asia/Tokyo")!)
         let acme = try store.ensureProject("Acme / Phase 2")
         for start in [now - 3600, now] {
             try store.createEntry(NewTimeEntry(start: start, end: start + 1800, projectID: acme.id, origin: .manual), now: now)
@@ -226,10 +354,13 @@ final class MCPServerTests: XCTestCase {
 
         let today = try call("summarize", ["range": "today", "group_by": "day"])
         XCTAssertEqual(today["groups"], [["key": "2026-10-10", "minutes": 30, "billable_minutes": 30]])
+        XCTAssertEqual(today["start"], "2026-10-10", "a date range is echoed as its local dates")
+        XCTAssertEqual(today["end"], "2026-10-10")
         let friday = try call("summarize", ["start": "2026-10-09", "end": "2026-10-09", "group_by": "day"])
         XCTAssertEqual(friday["groups"], [["key": "2026-10-09", "minutes": 30, "billable_minutes": 30]])
         let instants = try call("summarize", ["start": "2026-10-09T14:15:00Z", "end": "2026-10-09T15:15:00Z", "group_by": "day"])
         XCTAssertEqual(instants["total_minutes"], 30)
+        XCTAssertEqual(instants["start"], "2026-10-09T14:15:00Z")
     }
 
     func testFiguresAreRoundedOnceAndTotalsComeFromSeconds() throws {
@@ -262,10 +393,10 @@ final class MCPServerTests: XCTestCase {
 
     func testFiltersAndGroupBysWorkOrSayWhyNot() throws {
         let t = TimeRange.parseDate("2026-10-09T09:00:00Z")!
-        try store.insertActivity(start: t, end: t + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme code"))
-        try store.insertActivity(start: t + 3600, end: t + 5400, source: Source.window,
-                                 sample: ActivitySample(appName: "Safari", title: "beta docs"))
+        try store.work(ActivitySample(appName: "Xcode", title: "acme code"),
+                       from: t, to: t + 3600)
+        try store.work(ActivitySample(appName: "Safari", title: "beta docs"),
+                       from: t + 3600, to: t + 5400)
         _ = try call("create_project", ["name": "Phase 2", "client": "Acme"])
         _ = try call("create_project", ["name": "Rollout", "client": "Beta"])
         _ = try call("create_rule", ["project": "Acme / Phase 2", "field": "app_name", "op": "equals", "pattern": "Xcode"])

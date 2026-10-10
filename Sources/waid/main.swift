@@ -28,7 +28,11 @@ let usage = """
                                          "Client / Project" or an internal project name
       waid stop                          Stop the running timer
       waid import [--full]               Import Claude Code sessions now
-      waid status                        Show the current activity and timer
+      waid status                        Show the current activity, timer and idle threshold
+      waid settings idle-threshold [SECONDS]
+                                         Print the idle threshold, or set it (0 to 86400): the longest
+                                         pause in input that still counts as present. Changing it
+                                         re-reads every past day
       waid db-path                       Print the database location
 
     The database lives at $WAID_DB if set.
@@ -43,33 +47,21 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-/// Every process that opens the store reports the zone it's in (ADR-0001).
 func openStore() -> (Store, String) {
-    let opened: (Store, String)
     do {
         let path = try Store.defaultPath()
-        opened = (try Store(path: path), path)
+        return (try Store(path: path), path)
     } catch {
         fail("can't open database: \(error)")
     }
-    reportZone(to: opened.0)
-    return opened
 }
 
 /// The local dates a named range covers, counted from today where you are
-/// now per the zone history.
+/// now: the zone of the latest observation, else this process's zone.
 func namedRange(_ name: String, store: Store) -> ReportRange? {
     let now = Date()
     let zone = ((try? store.calendar(at: now)) ?? .current).timeZone
     return TimeRange.named(name, today: LocalDate(now, in: zone)).map(ReportRange.localDates)
-}
-
-/// Adds a zone-history record if the machine's zone has changed since the
-/// latest one. Re-reads the system zone, which Foundation otherwise caches for
-/// the life of the process.
-func reportZone(to store: Store) {
-    NSTimeZone.resetSystemTimeZone()
-    do { try store.recordZone(.current, now: Date()) } catch { log("recording time zone failed: \(error)") }
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -108,21 +100,47 @@ case "daemon":
         log("Accessibility access not granted; tracking apps only (no window titles). Grant it in System Settings > Privacy & Security > Accessibility.")
     }
     let sampler = MacActivitySampler()
-    let recorder = ActivityRecorder(store: store, maxGap: interval * 3)
+    let recorder = ActivityRecorder(store: store, interval: interval)
     let ingestor = ClaudeCodeIngestor()
     func importAgents() {
         do { try ingestor.ingest(into: store) } catch { log("agent import failed: \(error)") }
     }
-    func record(_ sample: ActivitySample?) {
-        reportZone(to: store)
-        do { try recorder.record(sample, at: Date()) } catch { log("recording failed: \(error)") }
+    func record(_ signal: ActivityRecorder.Signal) {
+        // Re-read the system zone, which Foundation otherwise caches for the life of the process.
+        NSTimeZone.resetSystemTimeZone()
+        do { try recorder.record(signal, at: Date(), zone: .current) } catch { log("recording failed: \(error)") }
     }
-    let center = NSWorkspace.shared.notificationCenter
-    for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
-                 NSWorkspace.sessionDidResignActiveNotification] {
-        center.addObserver(forName: name, object: nil, queue: .main) { _ in record(nil) }
+    // Waking fires while the lock screen is still up, so once the screen is
+    // locked only an unlock or a return to this session ends it.
+    var screenLocked = false
+    let workspace = NSWorkspace.shared.notificationCenter
+    let distributed = DistributedNotificationCenter.default()
+    // (center, name, signal, whether it locks (true) or unlocks (false) the screen)
+    let signals: [(NotificationCenter, Notification.Name, ActivityRecorder.Signal, Bool?)] = [
+        (workspace, NSWorkspace.willSleepNotification, .sleep, nil),
+        (workspace, NSWorkspace.screensDidSleepNotification, .lock, nil),
+        (workspace, NSWorkspace.sessionDidResignActiveNotification, .lock, true),
+        (distributed, Notification.Name("com.apple.screenIsLocked"), .lock, true),
+        (workspace, NSWorkspace.didWakeNotification, .wake, nil),
+        (workspace, NSWorkspace.screensDidWakeNotification, .unlock, nil),
+        (workspace, NSWorkspace.sessionDidBecomeActiveNotification, .unlock, false),
+        (distributed, Notification.Name("com.apple.screenIsUnlocked"), .unlock, false),
+    ]
+    for (center, name, signal, screenLock) in signals {
+        center.addObserver(forName: name, object: nil, queue: .main) { _ in
+            if let screenLock {
+                screenLocked = screenLock
+            } else if screenLocked && (signal == .wake || signal == .unlock) {
+                return
+            }
+            record(signal)
+        }
     }
-    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in record(sampler.sample()) }, forMode: .common)
+    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in
+        // No frontmost app: nothing to sample, so open observations stop
+        // extending and the heartbeat window closes them.
+        if let sample = sampler.sample() { record(.sample(sample)) }
+    }, forMode: .common)
     RunLoop.main.add(Timer(timeInterval: 300, repeats: true) { _ in importAgents() }, forMode: .common)
     importAgents()
     log("tracking every \(Int(interval))s into \(path)")
@@ -254,6 +272,14 @@ case "status":
        case .array(let content)? = value["result"]?["content"],
        let text = content.first?["text"]?.stringValue {
         print(text)
+    }
+
+case "settings":
+    let (store, _) = openStore()
+    do {
+        print(try SettingsCommand.run(args, store: store))
+    } catch {
+        fail("\(error)")
     }
 
 case "db-path":
