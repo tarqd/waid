@@ -83,6 +83,8 @@ public enum WaidTools {
             "notes": ["type": ["string", "null"], "description": "Billing narrative; shows up in timesheets."],
             "tags": ["type": "array", "items": ["type": "string"]],
             "billable": ["type": "boolean", "description": "Omit to derive from project and category."],
+            "zone": ["type": "string",
+                     "description": "IANA time zone the work happened in, e.g. \"Asia/Tokyo\"; sets the entry's local dates. Omit to use the zone the user was in at its start. Pass it when logging work done elsewhere."],
         ]
         let projectFields: [String: JSONValue] = [
             "client": ["type": ["string", "null"], "description": "Client name (created if missing). Omit or null for an internal project."],
@@ -118,6 +120,15 @@ public enum WaidTools {
             guard let s = try a.string(key) else { return nil }
             guard let d = TimeRange.parseDate(s) else { throw ToolError("can't parse \(key) \"\(s)\" as an ISO 8601 date/datetime") }
             return d
+        }
+        /// An IANA zone identifier such as "Asia/Tokyo"; abbreviations and
+        /// offsets are rejected.
+        func zone(_ a: Arguments) throws -> TimeZone? {
+            guard let id = try a.string("zone") else { return nil }
+            guard TimeZone.knownTimeZoneIdentifiers.contains(id) || id == "UTC", let zone = TimeZone(identifier: id) else {
+                throw ToolError("zone \"\(id)\" is not an IANA time zone identifier like \"Asia/Tokyo\"")
+            }
+            return zone
         }
         func requiredID(_ a: Arguments) throws -> Int64 {
             guard let id = try a.int("id") else { throw ToolError("missing required argument \"id\"") }
@@ -531,6 +542,7 @@ public enum WaidTools {
                 new.billable = try a.bool("billable")
                 new.author = ctx.author
                 new.status = try status(a) ?? .confirmed
+                new.zone = try zone(a)
                 return EntryView(try store.createEntry(new, now: now()), now: now())
             },
 
@@ -554,6 +566,7 @@ public enum WaidTools {
                 changes.tags = try a.strings("tags")
                 changes.billable = try a.bool("billable")
                 changes.status = try status(a)
+                changes.zone = try zone(a)
                 return EntryView(try store.updateEntry(id: try requiredID(a), changes, now: now()), now: now())
             },
 
@@ -724,6 +737,8 @@ struct ActivityView: Encodable {
     var projectFrom: String?
     var category: String?
     var categoryFrom: String?
+    var zone: String
+    var localDate: String
 
     init(_ a: Activity, now: Date) {
         id = a.id; start = a.start; end = a.end; minutes = WaidTools.minutes(a.duration(now: now))
@@ -731,11 +746,13 @@ struct ActivityView: Encodable {
         client = a.client; project = a.project; category = a.category
         projectFrom = a.assignedProjectID != nil ? "assigned" : (a.projectID != nil ? "rule" : nil)
         categoryFrom = a.assignedCategoryID != nil ? "assigned" : (a.categoryID != nil ? "rule" : nil)
+        zone = a.zone; localDate = a.localDate
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, start, end, minutes, source, app, title, url, path, client, project, category
+        case id, start, end, minutes, source, app, title, url, path, client, project, category, zone
         case bundleID = "bundle_id", projectFrom = "project_from", categoryFrom = "category_from"
+        case localDate = "local_date"
     }
 }
 
@@ -754,12 +771,21 @@ struct EntryView: Encodable {
     var origin: String
     var author: String
     var status: String
+    var zone: String
+    var startDate: String
+    var endDate: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, start, end, minutes, client, project, category, title, notes, tags, billable, origin, author, status, zone
+        case startDate = "start_date", endDate = "end_date"
+    }
 
     init(_ e: TimeEntry, now: Date) {
         id = e.id; start = e.start; end = e.end; minutes = WaidTools.minutes(e.duration(now: now))
         client = e.client; project = e.project; category = e.category
         title = e.title; notes = e.notes; tags = e.tags; billable = e.billable
         origin = e.origin.rawValue; author = e.author; status = e.status.rawValue
+        zone = e.zone; startDate = e.startDate; endDate = e.endDate
     }
 }
 
