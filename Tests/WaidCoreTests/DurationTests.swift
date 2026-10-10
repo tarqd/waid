@@ -20,8 +20,7 @@ final class DurationTests: XCTestCase {
     }
 
     func testRunningActivityStartingAfterNowCountsAsZero() throws {
-        try store.insertActivity(start: now + 600, end: nil, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode"))
+        try store.work(ActivitySample(appName: "Xcode"), from: now + 600, to: now + 600)
         let listed = try store.activities(in: day)
         XCTAssertEqual(listed.map { $0.duration(now: now) }, [0])
         XCTAssertEqual(try store.evidence(in: .instants(day), groupBy: .app, now: now), [])
@@ -29,8 +28,8 @@ final class DurationTests: XCTestCase {
 
     func testRunningSpansCountUpToNow() throws {
         // An open observation isn't Running: it counts up to its last heartbeat.
-        let open = try store.insertActivity(start: t0, end: nil, source: Source.window, sample: ActivitySample(appName: "Xcode"))
-        try store.setEnd(activityID: open, end: now)
+        // Recorded until now and still open.
+        try store.work(ActivitySample(appName: "Xcode"), from: t0, to: now)
         let project = try store.ensureProject("Acme / Phase 2")
         try store.startTimer(projectID: project.id, now: t0 + 1800)
 

@@ -84,9 +84,8 @@ final class ReportRangeTests: XCTestCase {
         try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-10T01:00:00+09:00")!)
         let project = try store.ensureProject("Travel")
         // Friday 22:00 in Tokyo until Saturday 02:00 in New York.
-        try store.insertActivity(start: TimeRange.parseDate("2026-10-09T22:00:00+09:00")!,
-                                 end: TimeRange.parseDate("2026-10-10T02:00:00-04:00")!, source: Source.window,
-                                 sample: ActivitySample(appName: "Mail"), projectID: project.id)
+        try store.work(ActivitySample(appName: "Mail"), from: TimeRange.parseDate("2026-10-09T22:00:00+09:00")!,
+                       to: TimeRange.parseDate("2026-10-10T02:00:00-04:00")!, projectID: project.id)
         let acme = try store.ensureProject("Acme / Phase 2")
         try entry("2026-10-09T23:00:00+09:00", "2026-10-09T23:30:00+09:00", project: acme)
         try entry("2026-10-09T13:00:00-04:00", "2026-10-09T13:30:00-04:00", project: acme)
@@ -112,9 +111,8 @@ final class ReportRangeTests: XCTestCase {
         try store.recordZone(newYork, now: TimeRange.parseDate("2026-10-10T01:00:00+09:00")!)
         let acme = try store.ensureProject("Acme / Phase 2")
         // Saturday 00:00-00:40 in Tokyo: after Friday in Tokyo, before Friday resumes in New York.
-        try store.insertActivity(start: TimeRange.parseDate("2026-10-10T00:00:00+09:00")!,
-                                 end: TimeRange.parseDate("2026-10-10T00:40:00+09:00")!, source: Source.window,
-                                 sample: ActivitySample(appName: "Mail"), projectID: acme.id)
+        try store.work(ActivitySample(appName: "Mail"), from: TimeRange.parseDate("2026-10-10T00:00:00+09:00")!,
+                       to: TimeRange.parseDate("2026-10-10T00:40:00+09:00")!, projectID: acme.id)
         try entry("2026-10-10T00:45:00+09:00", "2026-10-10T00:55:00+09:00", project: acme)
 
         let friday = ReportRange.localDates(LocalDate("2026-10-09")!...LocalDate("2026-10-09")!)

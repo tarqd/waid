@@ -69,10 +69,9 @@ final class ProfessionalServicesTests: XCTestCase {
         try store.addRule(projectID: acme.id, field: .title, op: .contains, pattern: "acme")
         XCTAssertThrowsError(try store.addRule(field: .title, op: .contains, pattern: "x"))
 
-        try store.insertActivity(start: t0, end: t0 + 1800, source: Source.window,
-                                 sample: ActivitySample(appName: "zoom.us", title: "Acme weekly sync"))
-        try store.insertActivity(start: t0 + 1800, end: t0 + 2400, source: Source.window,
-                                 sample: ActivitySample(appName: "Safari", title: "PROJ-12", url: "https://eu.acme.atlassian.net/browse/PROJ-12"))
+        try store.work(ActivitySample(appName: "zoom.us", title: "Acme weekly sync"), from: t0, to: t0 + 1800)
+        try store.work(ActivitySample(appName: "Safari", title: "PROJ-12", url: "https://eu.acme.atlassian.net/browse/PROJ-12"),
+                       from: t0 + 1800, to: t0 + 2400)
 
         let spans = try store.activities(in: day)
         XCTAssertEqual(spans[0].project, "Acme / Phase 2")
@@ -94,10 +93,8 @@ final class ProfessionalServicesTests: XCTestCase {
         try store.addRule(projectID: acme.id, field: .title, op: .contains, pattern: "acme")
         try store.addRule(categoryID: meetings.id, field: .appName, op: .equals, pattern: "zoom.us")
         try store.addRule(categoryID: implementation.id, field: .appName, op: .equals, pattern: "Xcode")
-        try store.insertActivity(start: t0, end: t0 + 1800, source: Source.window,
-                                 sample: ActivitySample(appName: "zoom.us", title: "Acme kickoff"))
-        try store.insertActivity(start: t0 + 1800, end: t0 + 5400, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme-integration"))
+        try store.work(ActivitySample(appName: "zoom.us", title: "Acme kickoff"), from: t0, to: t0 + 1800)
+        try store.work(ActivitySample(appName: "Xcode", title: "acme-integration"), from: t0 + 1800, to: t0 + 5400)
 
         let drafts = try store.suggestEntries(in: day, now: now).map(\.entry)
         XCTAssertEqual(drafts.map(\.category), ["Meetings", "Implementation"])
@@ -119,12 +116,9 @@ final class ProfessionalServicesTests: XCTestCase {
         try store.addRule(projectID: internalProject.id, field: .title, op: .contains, pattern: "waid")
         try store.addRule(categoryID: presales.id, field: .appName, op: .equals, pattern: "Keynote")
         try store.addRule(categoryID: implementation.id, field: .appName, op: .equals, pattern: "Xcode")
-        try store.insertActivity(start: t0, end: t0 + 3600, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "acme-integration"))
-        try store.insertActivity(start: t0 + 3600, end: t0 + 5400, source: Source.window,
-                                 sample: ActivitySample(appName: "Keynote", title: "Acme pitch"))
-        try store.insertActivity(start: t0 + 5400, end: t0 + 7200, source: Source.window,
-                                 sample: ActivitySample(appName: "Xcode", title: "waid"))
+        try store.work(ActivitySample(appName: "Xcode", title: "acme-integration"), from: t0, to: t0 + 3600)
+        try store.work(ActivitySample(appName: "Keynote", title: "Acme pitch"), from: t0 + 3600, to: t0 + 5400)
+        try store.work(ActivitySample(appName: "Xcode", title: "waid"), from: t0 + 5400, to: t0 + 7200)
 
         let byCategory = try store.unloggedTime(in: .instants(day), groupBy: .category, now: now)
         XCTAssertEqual(byCategory.groups, [

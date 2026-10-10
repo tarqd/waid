@@ -384,7 +384,7 @@ public final class Store {
     }
 
     public func activity(id: Int64) throws -> Activity? {
-        try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).first.map(Self.activity)
+        try attribute(try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).map(Self.activity)).first
     }
 
     /// Hides observations from queries and reports, or unhides them. Returns rows changed.
@@ -398,9 +398,9 @@ public final class Store {
     }
 
     public func latestActivity(source: String) throws -> Activity? {
-        try db.query(
+        try attribute(try db.query(
             "SELECT * FROM observations WHERE stream = 'focus' AND source = ? ORDER BY start_ts DESC LIMIT 1", [source]
-        ).first.map(Self.activity)
+        ).map(Self.activity)).first
     }
 
     public struct ActivityFilter {
@@ -416,7 +416,8 @@ public final class Store {
         public init() {}
     }
 
-    /// Spans overlapping `range`, with project, category and client resolved.
+    /// Activities whose extent overlaps `range`, with project, category and
+    /// client resolved and their counted intervals filled in.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter()) throws -> [Activity] {
         var sql = "SELECT * FROM observations WHERE stream = 'focus' AND start_ts < ? AND end_ts > ?"
         var params: [SQLBindable] = [range.end, range.start]
@@ -444,7 +445,7 @@ public final class Store {
             result.append(activity)
             if let limit = filter.limit, result.count >= limit { break }
         }
-        return result
+        return try attribute(result)
     }
 
     /// Spans with time on `range`'s local dates (or in its instants), oldest
@@ -505,7 +506,7 @@ public final class Store {
         for activity in try activities(overlapping: intervals, filter: filter, now: now) {
             let keys = TimeAccounting.GroupKeys(project: activity.project, client: activity.client,
                                                 category: activity.category, app: activity.appName, source: activity.source)
-            for clipped in TimeAccounting.clip(start: activity.start, end: activity.end, to: intervals, now: now) {
+            for clipped in TimeAccounting.clip(activity.counted, to: intervals) {
                 tally.add(clipped, groupBy: groupBy, keys: keys, dates: dates) { Key(key: $0, source: activity.source) }
             }
         }
