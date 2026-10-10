@@ -89,7 +89,7 @@ extension Store {
     func insertEntry(_ new: NewTimeEntry, now: Date) throws -> TimeEntry {
         try validate(start: new.start, end: new.end, excluding: nil, now: now)
         let billable = try new.billable ?? catalog().defaultBillable(projectID: new.projectID, categoryID: new.categoryID)
-        let stamped = stamp(start: new.start, end: new.end, zone: nil)
+        let stamped = try stamp(start: new.start, end: new.end, zone: new.zone)
         try db.run(
             """
             INSERT INTO time_entries(start_ts, end_ts, zone, start_date, end_date, project_id, category_id, title, notes,
@@ -118,15 +118,16 @@ extension Store {
             if let tags = changes.tags { entry.tags = tags }
             if let billable = changes.billable { entry.billable = billable }
             if let status = changes.status { entry.status = status }
+            if let zone = changes.zone { entry.zone = zone.identifier }
             try validate(start: entry.start, end: entry.end, excluding: id, now: now)
             let dates = Self.localDates(start: entry.start, end: entry.end, in: zone(of: entry))
             try db.run(
                 """
-                UPDATE time_entries SET start_ts = ?, end_ts = ?, start_date = ?, end_date = ?, project_id = ?,
+                UPDATE time_entries SET start_ts = ?, end_ts = ?, zone = ?, start_date = ?, end_date = ?, project_id = ?,
                     category_id = ?, title = ?, notes = ?, tags = ?, billable = ?, status = ?, updated_ts = ?
                 WHERE id = ?
                 """,
-                [entry.start, entry.end, dates.start, dates.end, entry.projectID, entry.categoryID, entry.title,
+                [entry.start, entry.end, entry.zone, dates.start, dates.end, entry.projectID, entry.categoryID, entry.title,
                  entry.notes, Self.encodeTags(entry.tags), entry.billable, entry.status.rawValue, now, id])
             return try requireTimeEntry(id: id)
         }
