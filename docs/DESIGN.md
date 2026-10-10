@@ -57,20 +57,29 @@ categories    id, name, billable                                 -- Presales (ne
 rules         id, project_id NULL, category_id NULL,             -- attribute activities at query time
               field, op, pattern, priority
 
-activities    id, source, start_ts, end_ts,                      -- OBSERVED: append-only evidence
-              bundle_id, app_name, title, url, path,
-              external_id,     -- (source, external_id) unique, so importers are idempotent
-              project_id, category_id,   -- manual overrides; otherwise rules decide
-              hidden, note, meta
+observations  id, stream (focus | active | locked),              -- OBSERVED: evidence, three untrimmed streams
+              source (window | agent:*),
+              start_ts, end_ts,  -- end never NULL: an open observation ends at its last heartbeat
+              open,              -- at most one open per (stream, source)
+              zone, local_date,  -- IANA zone it happened in and its date there (ADR-0002)
+              bundle_id, app_name, title, url, path,  -- focus payload; NULL on other streams
+              external_id,       -- focus only; (source, external_id) unique, so importers are idempotent
+              project_id, category_id, hidden, note,  -- overrides; otherwise rules decide
+              meta
 
 time_entries  id, start_ts, end_ts (NULL = running timer),       -- CLAIMED: editable, never overlapping
+              zone, start_date, end_date (NULL while running),   -- local dates in the entry's zone
               project_id, category_id, title, notes, tags, billable,
-              origin (timer | manual | from_activities | suggested),
+              origin (timer | manual | from_activities | suggested | away),
               author (user | agent:<client>),
               status (draft | confirmed)
 
-kv            key, value                                         -- bookkeeping, e.g. importer last run
+zone_history  id, zone, effective_ts                             -- ADR-0001; still read for ranges, going away
+kv            key, value                                         -- bookkeeping and settings, e.g. importer last run,
+                                                                 -- idle_threshold_seconds (default 180)
 ```
+
+The schema is one CREATE block of STRICT tables, and SQLite enforces the observation rules itself: CHECKs keep `end_ts >= start_ts` and the payload and `external_id` on focus, a trigger rejects an observation overlapping another of the same stream and source (imported agent segments, which have an `external_id`, may overlap each other, since sessions run in parallel), and a trigger rejects changes to the time, identity, zone and payload of a closed observation with no `external_id`. Overrides and `meta` stay editable on any row, and imported rows stay upsertable. An Activity is a focus observation (`GLOSSARY.md`).
 
 Terms below (Summary, Evidence, Unlogged time, Report) are defined in [`GLOSSARY.md`](../GLOSSARY.md).
 
