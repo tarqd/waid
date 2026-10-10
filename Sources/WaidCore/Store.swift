@@ -359,12 +359,13 @@ public final class Store {
         in range: DateInterval, groupBy: GroupBy, filter: ActivityFilter = ActivityFilter(),
         calendar: Calendar = .current, now: Date = Date()
     ) throws -> [EvidenceRow] {
+        let dates = try localDates(fallback: calendar)
         var totals: [String: [String: Double]] = [:]
         for activity in try activities(in: range, filter: filter, now: now) {
             let clipped = TimeAccounting.clip(start: activity.start, end: activity.end, to: range, now: now)
             let labels = TimeAccounting.Labels(project: activity.project, client: activity.client,
                                                category: activity.category, app: activity.appName, source: activity.source)
-            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, calendar: calendar)
+            for (key, seconds) in TimeAccounting.pieces(of: clipped, groupBy: groupBy, labels: labels, dates: dates)
             where seconds > 0 {
                 totals[key, default: [:]][activity.source, default: 0] += seconds
             }

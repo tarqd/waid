@@ -75,15 +75,17 @@ kv            key, value                                         -- bookkeeping,
 Terms below (Summary, Evidence, Unlogged time, Report) are defined in [`GLOSSARY.md`](../GLOSSARY.md).
 
 Claimed time:
-- **Summary** (`summarize`, `waid report`): time entry totals, confirmed only unless drafts are asked for, with billable time and utilization (billable ÷ total). Grouped by client, project, category or day. This is the number to quote and bill.
+- **Summary** (`summarize`, `waid report`): time entry totals, confirmed only unless drafts are asked for, with billable time and utilization (billable ÷ total). Grouped by client, project, category or local date. This is the number to quote and bill.
 
 Evidence for claiming time (the `evidence` tool, `waid report --evidence|--unlogged`), never presented as claimed time:
-- **Evidence**: activity totals, where your time actually went, per source and never summed across sources (decision 7). Grouped by client, project, category, app, source or day.
-- **Unlogged time**: work a suggestion would offer you to claim (stretches where one project dominates, agents excluded) that no confirmed entry covers ("3 h on Acme you haven't logged"). Grouped by client, project, category or day.
+- **Evidence**: activity totals, where your time actually went, per source and never summed across sources (decision 7). Grouped by client, project, category, app, source or local date.
+- **Unlogged time**: work a suggestion would offer you to claim (stretches where one project dominates, agents excluded) that no confirmed entry covers ("3 h on Acme you haven't logged"). Grouped by client, project, category or local date.
 
 Two professional-services **Reports** sit on top of Summaries:
 - **Budget status**: confirmed hours against `budget_hours` per engagement, plus unconfirmed drafts, remaining hours and burn.
 - **Timesheet**: one row per day × project × category, with entry titles and notes as the billing narrative, exportable as CSV.
+
+Days in every report are **local dates**: the date where you were when the time happened, from the zone history waid records as you travel, not the zone the report runs in. A span crossing a zone change or local midnight is split, and each piece lands on its own local date. See `GLOSSARY.md` (Zone history, Local date) and [ADR-0001](adr/0001-zone-history.md).
 
 ### Suggesting entries
 
