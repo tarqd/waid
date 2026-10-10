@@ -129,6 +129,8 @@ public final class Store {
 
         -- No two observations of one stream and source overlap. Imported
         -- agent segments may overlap each other: sessions run in parallel.
+        -- SQLite triggers can't share a body, so the insert and update
+        -- triggers repeat the same WHEN EXISTS; keep the two in sync.
         CREATE TRIGGER observations_no_overlap_insert BEFORE INSERT ON observations
         WHEN EXISTS (
             SELECT 1 FROM observations o
@@ -252,7 +254,7 @@ public final class Store {
             [key, value])
     }
 
-    // MARK: Activities
+    // MARK: Observations
 
     /// Inserts a focus observation stamped with `zone` (else `processZone`)
     /// and the local date of its start there. With no `end` it is open, its
@@ -315,7 +317,7 @@ public final class Store {
         return row[0].int("id")!
     }
 
-    /// Explicitly assigns spans to a project and/or category, overriding
+    /// Explicitly assigns observations to a project and/or category, overriding
     /// rules. nil leaves a dimension alone; .some(nil) clears the override.
     /// Returns rows changed.
     @discardableResult
@@ -338,7 +340,7 @@ public final class Store {
         try db.query("SELECT * FROM observations WHERE stream = 'focus' AND id = ?", [id]).first.map(Self.activity)
     }
 
-    /// Hides spans from queries and reports, or unhides them. Returns rows changed.
+    /// Hides observations from queries and reports, or unhides them. Returns rows changed.
     @discardableResult
     public func setHidden(activityIDs: [Int64], hidden: Bool) throws -> Int {
         try db.transaction {

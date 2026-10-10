@@ -17,7 +17,7 @@ public final class ActivityRecorder {
     public let maxGap: TimeInterval
     public let idleThreshold: TimeInterval
     private var current: (id: Int64, key: Key, start: Date, end: Date)?
-    private var started = false
+    private var closedLeftovers = false
 
     public init(store: Store, maxGap: TimeInterval = 30, idleThreshold: TimeInterval = 180) {
         self.store = store
@@ -29,15 +29,15 @@ public final class ActivityRecorder {
     /// store's process zone). Pass a nil sample when nothing should be
     /// tracked (screen locked, system going to sleep).
     public func record(_ sample: ActivitySample?, at now: Date, zone: TimeZone? = nil) throws {
-        if !started {
+        if !closedLeftovers {
             // Whatever a previous run left open ended at its last heartbeat.
             try store.closeOpenObservations()
-            started = true
+            closedLeftovers = true
         }
         guard let sample, sample.idleSeconds < idleThreshold else {
             if let current {
                 // Trim the idle tail: input stopped `idleSeconds` ago, but we
-                // kept extending the span until the threshold tripped.
+                // kept extending the observation until the threshold tripped.
                 var end = current.end
                 if let sample {
                     let lastInput = now.addingTimeInterval(-sample.idleSeconds)
@@ -56,8 +56,9 @@ public final class ActivityRecorder {
             self.current = current
         } else {
             if let current {
-                // A switch within the gap means the previous span lasted
-                // until now; after a longer gap it ended at its last sample.
+                // A switch within the gap means the previous observation
+                // lasted until now; after a longer gap it ended at its last
+                // sample.
                 let end = now.timeIntervalSince(current.end) <= maxGap ? now : current.end
                 try store.close(activityID: current.id, end: end)
             }
