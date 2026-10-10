@@ -147,6 +147,15 @@ public final class Store {
         DROP TABLE rules;
         ALTER TABLE rules_new RENAME TO rules;
         """,
+        // Zone history (ADR-0001): which time zone you were in, and from when.
+        """
+        CREATE TABLE zone_history(
+            id INTEGER PRIMARY KEY,
+            zone TEXT NOT NULL,
+            effective_ts REAL NOT NULL
+        );
+        CREATE INDEX zone_history_effective ON zone_history(effective_ts);
+        """,
     ]
 
     public init(path: String) throws {
@@ -292,7 +301,7 @@ public final class Store {
 
     /// Spans overlapping `range`, with project, category and client resolved.
     public func activities(in range: DateInterval, filter: ActivityFilter = ActivityFilter(), now: Date = Date()) throws -> [Activity] {
-        var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, ?) > ?"
+        var sql = "SELECT * FROM activities WHERE start_ts < ? AND COALESCE(end_ts, MAX(?, start_ts)) > ?"
         var params: [SQLBindable] = [range.end, now, range.start]
         if !filter.includeHidden { sql += " AND hidden = 0" }
         if let sources = filter.sources, !sources.isEmpty {

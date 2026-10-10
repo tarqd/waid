@@ -42,13 +42,25 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
+/// Every process that opens the store reports the zone it's in (ADR-0001).
 func openStore() -> (Store, String) {
+    let opened: (Store, String)
     do {
         let path = try Store.defaultPath()
-        return (try Store(path: path), path)
+        opened = (try Store(path: path), path)
     } catch {
         fail("can't open database: \(error)")
     }
+    reportZone(to: opened.0)
+    return opened
+}
+
+/// Adds a zone-history record if the machine's zone has changed since the
+/// latest one. Re-reads the system zone, which Foundation otherwise caches for
+/// the life of the process.
+func reportZone(to store: Store) {
+    NSTimeZone.resetSystemTimeZone()
+    do { try store.recordZone(.current, now: Date()) } catch { log("recording time zone failed: \(error)") }
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -93,6 +105,7 @@ case "daemon":
         do { try ingestor.ingest(into: store) } catch { log("agent import failed: \(error)") }
     }
     func record(_ sample: ActivitySample?) {
+        reportZone(to: store)
         do { try recorder.record(sample, at: Date()) } catch { log("recording failed: \(error)") }
     }
     let center = NSWorkspace.shared.notificationCenter

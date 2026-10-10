@@ -195,7 +195,7 @@ extension Store {
                 "DELETE FROM time_entries WHERE origin = ? AND status = ? AND start_ts < ? AND end_ts > ?",
                 [EntryOrigin.suggested.rawValue, EntryStatus.draft.rawValue, range.end, range.start])
             let occupied = try timeEntries(in: range, now: now).map {
-                DateInterval(start: $0.start, end: max($0.start, $0.end ?? now))
+                DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
             }
             let blocks = suggester.blocks(from: try activities(in: range, now: now), in: range, avoiding: occupied)
             return try blocks.map { block in
@@ -289,7 +289,7 @@ extension Store {
         var filter = EntryFilter()
         filter.status = .confirmed
         let covered = try timeEntries(in: range, filter: filter, now: now).map {
-            DateInterval(start: $0.start, end: max($0.start, $0.end ?? now))
+            DateInterval(start: $0.start, end: TimeAccounting.end(start: $0.start, end: $0.end, now: now))
         }
         let catalog = try catalog()
         var totals: [String: Double] = [:]

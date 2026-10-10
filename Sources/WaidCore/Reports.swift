@@ -23,21 +23,16 @@ extension Store {
     public func budgetStatus(projectIDs: [Int64]? = nil, now: Date = Date()) throws -> [BudgetRow] {
         let projects = try projectIDs.map { try $0.compactMap { try project(id: $0) } }
             ?? self.projects().filter { $0.budgetHours != nil }
-        let totals = try db.query(
-            """
-            SELECT project_id, status, billable, SUM(COALESCE(end_ts, MAX(?, start_ts)) - start_ts) AS seconds
-            FROM time_entries WHERE project_id IS NOT NULL GROUP BY project_id, status, billable
-            """, [now])
         var used: [Int64: (confirmed: Double, billable: Double, draft: Double)] = [:]
-        for row in totals {
-            guard let id = row.int("project_id") else { continue }
-            let hours = (row.double("seconds") ?? 0) / 3600
+        for entry in try timeEntries(in: TimeAccounting.allTime, now: now) {
+            guard let id = entry.projectID else { continue }
+            let hours = TimeAccounting.clip(start: entry.start, end: entry.end, to: TimeAccounting.allTime, now: now).duration / 3600
             var t = used[id] ?? (0, 0, 0)
-            if row.string("status") == EntryStatus.draft.rawValue {
+            if entry.status == .draft {
                 t.draft += hours
             } else {
                 t.confirmed += hours
-                if row.int("billable") == 1 { t.billable += hours }
+                if entry.billable { t.billable += hours }
             }
             used[id] = t
         }
