@@ -32,6 +32,27 @@ public enum Source {
     public static func agent(_ name: String) -> String { agentPrefix + name }
 }
 
+/// A stretch of one stream as the daemon saw it (GLOSSARY.md), without the
+/// focus payload: `Activity` is the focus view with that payload resolved.
+public struct Observation: Codable, Equatable, Sendable {
+    /// What an observation says: what was in front, when input was seen, or
+    /// when the machine was locked or asleep.
+    public enum Stream: String, Codable, CaseIterable, Sendable {
+        case focus, active, locked
+    }
+
+    public var id: Int64
+    public var stream: Stream
+    public var source: String
+    public var start: Date
+    /// Its last heartbeat while open.
+    public var end: Date
+    public var open: Bool
+    /// The IANA zone it happened in, and its local date there ("yyyy-MM-dd").
+    public var zone: String
+    public var localDate: String
+}
+
 /// A focus observation: a window in front, an agent session. Activities are
 /// evidence; they are categorized but not edited.
 public struct Activity: Codable, Equatable, Sendable {

@@ -265,16 +265,49 @@ public final class Store {
         start: Date, end: Date?, source: String, sample: ActivitySample = ActivitySample(),
         projectID: Int64? = nil, note: String? = nil, zone: TimeZone? = nil
     ) throws -> Int64 {
+        try insert(.focus, start: start, end: end, source: source, sample: sample,
+                   projectID: projectID, note: note, zone: zone)
+    }
+
+    /// Inserts an observation of any stream, open with no `end`, as
+    /// `insertActivity` does for focus. Only focus carries `sample`'s payload.
+    @discardableResult
+    public func insertObservation(
+        _ stream: Observation.Stream, start: Date, end: Date?, source: String = Source.window,
+        sample: ActivitySample? = nil, zone: TimeZone? = nil
+    ) throws -> Int64 {
+        try insert(stream, start: start, end: end, source: source, sample: sample, projectID: nil, note: nil, zone: zone)
+    }
+
+    private func insert(
+        _ stream: Observation.Stream, start: Date, end: Date?, source: String, sample: ActivitySample?,
+        projectID: Int64?, note: String?, zone: TimeZone?
+    ) throws -> Int64 {
         let stamped = stamp(start: start, zone: zone)
         try db.run(
             """
             INSERT INTO observations(stream, source, start_ts, end_ts, open, zone, local_date,
                                      bundle_id, app_name, title, url, path, project_id, note)
-            VALUES('focus', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [source, start, end ?? start, end == nil, stamped.zone.identifier, stamped.startDate,
-             sample.bundleID, sample.appName, sample.title, sample.url, sample.path, projectID, note])
+            [stream.rawValue, source, start, end ?? start, end == nil, stamped.zone.identifier, stamped.startDate,
+             sample?.bundleID, sample?.appName, sample?.title, sample?.url, sample?.path, projectID, note])
         return db.lastInsertRowID
+    }
+
+    /// Observations of `stream` overlapping `range`, oldest first.
+    public func observations(_ stream: Observation.Stream, in range: DateInterval) throws -> [Observation] {
+        try db.query(
+            """
+            SELECT id, stream, source, start_ts, end_ts, open, zone, local_date FROM observations
+            WHERE stream = ? AND start_ts < ? AND end_ts > ? ORDER BY start_ts
+            """, [stream.rawValue, range.end, range.start]
+        ).map { row in
+            Observation(
+                id: row.int("id")!, stream: Observation.Stream(rawValue: row.string("stream")!)!,
+                source: row.string("source")!, start: row.date("start_ts")!, end: row.date("end_ts")!,
+                open: row.int("open") == 1, zone: row.string("zone")!, localDate: row.string("local_date")!)
+        }
     }
 
     /// Moves an open observation's heartbeat. A closed one can't be changed.
