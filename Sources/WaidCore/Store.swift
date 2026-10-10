@@ -422,7 +422,7 @@ public final class Store {
         try activities(where: "start_ts < ? AND end_ts > ?", [range.end, range.start], filter: filter)
     }
 
-    /// Spans `range` selects, oldest first, with project, category and
+    /// Activities `range` selects, oldest first, with project, category and
     /// client resolved: those stamped with one of its local dates, or those
     /// overlapping its instants.
     public func activities(

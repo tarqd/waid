@@ -841,7 +841,6 @@ struct TimeGroupView: Encodable {
     }
 }
 
-/// A Summary: claimed time from time entries.
 /// The range a report covers, echoed back as `start` and `end`: its first and
 /// last local dates ("yyyy-MM-dd", both inclusive), or its instants (end
 /// exclusive), as the caller gave it.
@@ -860,6 +859,7 @@ struct RangeView {
     }
 }
 
+/// A Summary: claimed time from time entries.
 struct SummaryView: Encodable {
     var range: RangeView
     var groupBy: String
