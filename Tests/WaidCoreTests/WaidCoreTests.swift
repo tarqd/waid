@@ -11,20 +11,20 @@ final class RecorderTests: XCTestCase {
     }
 
     func testSameWindowExtendsSpan() throws {
-        let recorder = ActivityRecorder(store: store, maxGap: 15)
+        let recorder = ActivityRecorder(store: store, interval: 5)
         let editor = ActivitySample(bundleID: "com.apple.dt.Xcode", appName: "Xcode", title: "main.swift")
-        for i in 0..<4 { try recorder.record(editor, at: t0.addingTimeInterval(Double(i) * 5)) }
+        for i in 0..<4 { try recorder.record(.sample(editor), at: t0.addingTimeInterval(Double(i) * 5)) }
         let spans = try store.activities(in: DateInterval(start: t0, duration: 3600))
         XCTAssertEqual(spans.count, 1)
         XCTAssertEqual(spans[0].duration(), 15)
     }
 
     func testTitleChangeAndGapStartNewSpans() throws {
-        let recorder = ActivityRecorder(store: store, maxGap: 15)
-        try recorder.record(ActivitySample(appName: "Xcode", title: "a.swift"), at: t0)
-        try recorder.record(ActivitySample(appName: "Xcode", title: "b.swift"), at: t0.addingTimeInterval(5))
+        let recorder = ActivityRecorder(store: store, interval: 5)
+        try recorder.record(.sample(ActivitySample(appName: "Xcode", title: "a.swift")), at: t0)
+        try recorder.record(.sample(ActivitySample(appName: "Xcode", title: "b.swift")), at: t0.addingTimeInterval(5))
         // Machine slept for an hour.
-        try recorder.record(ActivitySample(appName: "Xcode", title: "b.swift"), at: t0.addingTimeInterval(3605))
+        try recorder.record(.sample(ActivitySample(appName: "Xcode", title: "b.swift")), at: t0.addingTimeInterval(3605))
         let spans = try store.activities(in: DateInterval(start: t0, duration: 7200))
         XCTAssertEqual(spans.map(\.title), ["a.swift", "b.swift", "b.swift"])
         XCTAssertEqual(spans[0].duration(), 5, "closed at the switch, not the last sample")
@@ -32,12 +32,12 @@ final class RecorderTests: XCTestCase {
     }
 
     func testRestartedRecorderClosesWhatItLeftOpen() throws {
-        let crashed = ActivityRecorder(store: store, maxGap: 15)
-        try crashed.record(ActivitySample(appName: "Xcode", title: "a.swift"), at: t0)
-        try crashed.record(ActivitySample(appName: "Xcode", title: "a.swift"), at: t0.addingTimeInterval(5))
+        let crashed = ActivityRecorder(store: store, interval: 5)
+        try crashed.record(.sample(ActivitySample(appName: "Xcode", title: "a.swift")), at: t0)
+        try crashed.record(.sample(ActivitySample(appName: "Xcode", title: "a.swift")), at: t0.addingTimeInterval(5))
 
-        let restarted = ActivityRecorder(store: store, maxGap: 15)
-        try restarted.record(ActivitySample(appName: "Safari", title: "Docs"), at: t0.addingTimeInterval(600))
+        let restarted = ActivityRecorder(store: store, interval: 5)
+        try restarted.record(.sample(ActivitySample(appName: "Safari", title: "Docs")), at: t0.addingTimeInterval(600))
         let spans = try store.activities(in: DateInterval(start: t0, duration: 3600))
         XCTAssertEqual(spans.map(\.title), ["a.swift", "Docs"])
         XCTAssertEqual(spans.map(\.open), [false, true], "closed at its last heartbeat")
@@ -45,16 +45,128 @@ final class RecorderTests: XCTestCase {
     }
 
     func testIdleTrimsTail() throws {
-        let recorder = ActivityRecorder(store: store, maxGap: 15, idleThreshold: 60)
+        let recorder = ActivityRecorder(store: store, interval: 5, idleThreshold: 60)
         let s = ActivitySample(appName: "Safari", title: "Docs")
         var idle = s
         for i in 0...20 {
             idle.idleSeconds = Double(max(0, i * 5 - 30))  // last input at t0+30
-            try recorder.record(idle, at: t0.addingTimeInterval(Double(i) * 5))
+            try recorder.record(.sample(idle), at: t0.addingTimeInterval(Double(i) * 5))
         }
         let spans = try store.activities(in: DateInterval(start: t0, duration: 3600))
         XCTAssertEqual(spans.count, 1)
         XCTAssertEqual(spans[0].duration(), 30, accuracy: 0.001)
+    }
+}
+
+/// The recorder writes the focus, active and locked streams from one signal
+/// at a time, read back through the Store.
+final class RecorderStreamTests: XCTestCase {
+    var store: Store!
+    let t0 = TimeRange.parseDate("2026-10-09T09:00:00Z")!
+    let berlin = TimeZone(identifier: "Europe/Berlin")!
+    let editor = ActivitySample(appName: "Xcode", title: "main.swift")
+
+    override func setUpWithError() throws {
+        store = try Store(path: ":memory:")
+    }
+
+    /// Start and end offsets from `t0`, and whether still open.
+    func spans(_ stream: Observation.Stream, hours: Double = 3) throws -> [[Double]] {
+        try store.observations(stream, in: DateInterval(start: t0 - 3600, duration: hours * 3600)).map {
+            [$0.start.timeIntervalSince(t0), $0.end.timeIntervalSince(t0), $0.open ? 1 : 0]
+        }
+    }
+
+    func testAScriptedDayWritesFocusActiveAndLockedObservations() throws {
+        let recorder = ActivityRecorder(store: store, interval: 5, idleThreshold: 60)
+        func sample(_ at: Double, idle: Double = 0) throws {
+            var s = editor
+            s.idleSeconds = idle
+            try recorder.record(.sample(s), at: t0 + at, zone: berlin)
+        }
+        // Input until +30, then a pause until the idle threshold trips at +90.
+        for t in stride(from: 0.0, through: 30, by: 5) { try sample(t) }
+        for t in stride(from: 35.0, through: 90, by: 5) { try sample(t, idle: t - 30) }
+        // Input again, then the screen locks and the machine sleeps an hour.
+        for t in stride(from: 100.0, through: 120, by: 5) { try sample(t) }
+        try recorder.record(.lock, at: t0 + 122, zone: berlin)
+        try recorder.record(.sleep, at: t0 + 123, zone: berlin)
+        try recorder.record(.wake, at: t0 + 3722, zone: berlin)
+        try recorder.record(.unlock, at: t0 + 3725, zone: berlin)
+        for t in stride(from: 3730.0, through: 3750, by: 5) { try sample(t) }
+
+        XCTAssertEqual(try spans(.focus), [[0, 30, 0], [100, 122, 0], [3730, 3750, 1]], "focus keeps its idle trim")
+        XCTAssertEqual(try spans(.active), [[0, 30, 0], [100, 122, 0], [3730, 3750, 1]])
+        XCTAssertEqual(try spans(.locked), [[122, 3722, 0]], "wake closes it; the later unlock changes nothing")
+        let observed = try store.observations(.locked, in: DateInterval(start: t0, duration: 7200))
+        XCTAssertEqual(observed.map(\.zone), ["Europe/Berlin"])
+        XCTAssertEqual(observed.map(\.localDate), ["2026-10-09"])
+
+        // Evidence is still the trimmed focus stream.
+        let evidence = try store.evidence(in: .instants(DateInterval(start: t0, duration: 7200)), groupBy: .app, now: t0 + 3750)
+        XCTAssertEqual(evidence, [Store.EvidenceRow(key: "Xcode", secondsBySource: [Source.window: 72])])
+    }
+
+    func testARestartedRecorderClosesEveryStreamAtItsStoredEndAndCarriesOn() throws {
+        let crashed = ActivityRecorder(store: store, interval: 5)
+        for t in [0.0, 5, 10] { try crashed.record(.sample(editor), at: t0 + t, zone: berlin) }
+        try crashed.record(.lock, at: t0 + 12, zone: berlin)
+        try crashed.record(.sample(editor), at: t0 + 20, zone: berlin)  // a heartbeat while locked
+
+        let restarted = ActivityRecorder(store: store, interval: 5)
+        for t in [600.0, 605] { try restarted.record(.sample(editor), at: t0 + t, zone: berlin) }
+        XCTAssertEqual(try spans(.locked), [[12, 20, 0]], "closed at its last heartbeat")
+        XCTAssertEqual(try spans(.focus), [[0, 12, 0], [600, 605, 1]])
+        XCTAssertEqual(try spans(.active), [[0, 12, 0], [600, 605, 1]])
+
+        // Left open by a crash mid-sample, not mid-lock.
+        let again = ActivityRecorder(store: store, interval: 5)
+        try again.record(.sample(editor), at: t0 + 700, zone: berlin)
+        XCTAssertEqual(try spans(.focus), [[0, 12, 0], [600, 605, 0], [700, 700, 1]])
+        XCTAssertEqual(try spans(.active), [[0, 12, 0], [600, 605, 0], [700, 700, 1]])
+    }
+
+    func testEvidenceAndSuggestionsFromRecordedSamplesStillTrimIdleTime() throws {
+        let acme = try store.ensureProject("Acme / Phase 2")
+        try store.addRule(projectID: acme.id, field: .title, op: .contains, pattern: "acme")
+        let recorder = ActivityRecorder(store: store, interval: 5)
+        var sample = ActivitySample(appName: "Xcode", title: "acme-integration")
+        // 30 minutes of input, 10 minutes reading without input, 20 more of input.
+        for t in stride(from: 0.0, through: 3600, by: 5) {
+            sample.idleSeconds = (1800..<2400).contains(t) ? t - 1800 : 0
+            try recorder.record(.sample(sample), at: t0 + t, zone: berlin)
+        }
+        let now = t0 + 3600
+        let hour = DateInterval(start: t0, duration: 3600)
+        XCTAssertEqual(try store.evidence(in: .instants(hour), groupBy: .project, now: now),
+                       [Store.EvidenceRow(key: "Acme / Phase 2", secondsBySource: [Source.window: 3000])])
+        let drafts = try store.suggestEntries(in: hour, now: now).map(\.entry)
+        XCTAssertEqual(drafts.map { [$0.start.timeIntervalSince(t0) / 60, $0.duration() / 60] }, [[0, 30], [40, 20]])
+        XCTAssertEqual(try store.unloggedTime(in: .instants(hour), groupBy: .project, now: now).seconds, 50 * 60)
+    }
+
+    func testObservationsCrossingLocalMidnightSplitThere() throws {
+        let tokyo = TimeZone(identifier: "Asia/Tokyo")!
+        let midnight = TimeRange.parseDate("2026-10-10T00:00:00+09:00")!
+        let recorder = ActivityRecorder(store: store, interval: 5)
+        for t in stride(from: -10.0, through: 10, by: 5) {
+            try recorder.record(.sample(editor), at: midnight + t, zone: tokyo)
+        }
+        // Then the machine sleeps across the next midnight.
+        try recorder.record(.sleep, at: midnight + 86000, zone: tokyo)
+        try recorder.record(.wake, at: midnight + 86400 + 600, zone: tokyo)
+
+        let day = DateInterval(start: midnight - 3600, duration: 2 * 86400)
+        for stream in [Observation.Stream.focus, .active] {
+            let observed = try store.observations(stream, in: day)
+            XCTAssertEqual(observed.map { [$0.start, $0.end].map { $0.timeIntervalSince(midnight) } }, [[-10, 0], [0, 10]], "\(stream)")
+            XCTAssertEqual(observed.map(\.localDate), ["2026-10-09", "2026-10-10"], "\(stream)")
+            XCTAssertEqual(observed.map(\.zone), ["Asia/Tokyo", "Asia/Tokyo"], "\(stream)")
+        }
+        XCTAssertEqual(try store.activities(in: day).map(\.title), ["main.swift", "main.swift"], "same payload")
+        let locked = try store.observations(.locked, in: day)
+        XCTAssertEqual(locked.map { [$0.start, $0.end].map { $0.timeIntervalSince(midnight) } }, [[86000, 86400], [86400, 87000]])
+        XCTAssertEqual(locked.map(\.localDate), ["2026-10-10", "2026-10-11"])
     }
 }
 

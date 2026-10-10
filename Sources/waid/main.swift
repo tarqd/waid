@@ -108,21 +108,32 @@ case "daemon":
         log("Accessibility access not granted; tracking apps only (no window titles). Grant it in System Settings > Privacy & Security > Accessibility.")
     }
     let sampler = MacActivitySampler()
-    let recorder = ActivityRecorder(store: store, maxGap: interval * 3)
+    let recorder = ActivityRecorder(store: store, interval: interval)
     let ingestor = ClaudeCodeIngestor()
     func importAgents() {
         do { try ingestor.ingest(into: store) } catch { log("agent import failed: \(error)") }
     }
-    func record(_ sample: ActivitySample?) {
-        reportZone(to: store)
-        do { try recorder.record(sample, at: Date()) } catch { log("recording failed: \(error)") }
+    func record(_ signal: ActivityRecorder.Signal) {
+        reportZone(to: store)  // also refreshes TimeZone.current
+        do { try recorder.record(signal, at: Date(), zone: .current) } catch { log("recording failed: \(error)") }
     }
     let center = NSWorkspace.shared.notificationCenter
-    for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
-                 NSWorkspace.sessionDidResignActiveNotification] {
-        center.addObserver(forName: name, object: nil, queue: .main) { _ in record(nil) }
+    let signals: [(Notification.Name, ActivityRecorder.Signal)] = [
+        (NSWorkspace.willSleepNotification, .sleep),
+        (NSWorkspace.screensDidSleepNotification, .lock),
+        (NSWorkspace.sessionDidResignActiveNotification, .lock),
+        (NSWorkspace.didWakeNotification, .wake),
+        (NSWorkspace.screensDidWakeNotification, .unlock),
+        (NSWorkspace.sessionDidBecomeActiveNotification, .unlock),
+    ]
+    for (name, signal) in signals {
+        center.addObserver(forName: name, object: nil, queue: .main) { _ in record(signal) }
     }
-    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in record(sampler.sample()) }, forMode: .common)
+    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in
+        // No frontmost app: nothing to sample, so open observations stop
+        // extending and the heartbeat window closes them.
+        if let sample = sampler.sample() { record(.sample(sample)) }
+    }, forMode: .common)
     RunLoop.main.add(Timer(timeInterval: 300, repeats: true) { _ in importAgents() }, forMode: .common)
     importAgents()
     log("tracking every \(Int(interval))s into \(path)")
