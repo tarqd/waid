@@ -6,8 +6,12 @@ A local, agent-native time tracker for professional-services work: it observes w
 
 ### Time
 
+**Observation**:
+A stretch of one stream as the daemon saw it: what was in front (focus), when input was seen (active), or when the machine was locked or asleep (locked). An imported agent session is also an observation. Raw evidence, never shown on its own.
+_Avoid_: sample, event, heartbeat, span
+
 **Activity**:
-A span of observed work, recorded automatically from a source such as the focused window or an agent session. Evidence you categorize but don't edit.
+A focus observation counting only the time you were present. Evidence you categorize but don't edit. Agent sessions count in full; they say nothing about whether you were present.
 _Avoid_: event, sample, span (for the stored record)
 
 **Time entry**:
@@ -17,13 +21,17 @@ _Avoid_: log, record, ledger
 **Running**:
 A span with no end yet. It counts up to now, and counts nothing if it starts after now.
 
-**Zone history**:
-The record of which time zone you were in, and from when. Time before the first record is in the first recorded zone; a change noticed late applies from when it was noticed.
-_Avoid_: timezone setting
+**Present**:
+The stretches when input was seen, bridged across gaps no longer than the idle threshold. The threshold is a setting, and changing it re-reads history.
+_Avoid_: active (for the derived result), not idle
+
+**Away**:
+Observed time when you were not present, including while the machine was locked or asleep. What waid can ask you about afterwards.
+_Avoid_: idle time, gap
 
 **Local date**:
-The calendar date where you were when something happened, according to the zone history. A span's day is its local date, wherever and whenever you look at it; a span crossing midnight or a zone change has more than one.
-_Avoid_: day (unqualified, when the zone matters)
+The calendar date where you were when something happened, recorded with it in the zone you were in. A span's day is its local date, wherever and whenever you look at it; an observation has one, and a time entry crossing midnight has more than one.
+_Avoid_: day (unqualified, when the zone matters), zone history
 
 ### Claiming time
 
