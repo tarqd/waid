@@ -10,6 +10,10 @@ import WaidCore
 /// Needs the Accessibility permission for window titles and documents, and
 /// Automation permission (per browser) for URLs. Without them it degrades to
 /// app-level tracking. Must be called on the main thread (NSAppleScript).
+///
+/// Accessibility requests to an app that isn't responding wait at most
+/// `messagingTimeout` instead of the system default of about six seconds,
+/// so one hung app can't stall the daemon's run loop.
 public final class MacActivitySampler {
     /// Browsers whose URL we can read via AppleScript, keyed by bundle id.
     static let browserScripts: [String: String] = {
@@ -26,7 +30,9 @@ public final class MacActivitySampler {
     /// Apps that refused Automation access; don't ask again this run.
     private var urlDenied: Set<String> = []
 
-    public init() {}
+    public init(messagingTimeout: Float = 1) {
+        _ = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeout)
+    }
 
     /// Whether we have Accessibility access. With `prompt`, macOS shows the
     /// system dialog pointing the user at System Settings.

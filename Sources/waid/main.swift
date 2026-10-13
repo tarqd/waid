@@ -136,14 +136,20 @@ case "daemon":
             record(signal)
         }
     }
-    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in
+    func sampleFront() {
         // No frontmost app: nothing to sample, so open observations stop
         // extending and the heartbeat window closes them.
         if let sample = sampler.sample() { record(.sample(sample)) }
-    }, forMode: .common)
+    }
+    // A switch is sampled as it happens; the timer is the heartbeat that
+    // bounds what a crash loses, keeps the active stream current, and covers
+    // apps that post no Accessibility notifications.
+    let focusChanges = FocusChangeObserver(onChange: sampleFront)
+    focusChanges.start()
+    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in sampleFront() }, forMode: .common)
     RunLoop.main.add(Timer(timeInterval: 300, repeats: true) { _ in importAgents() }, forMode: .common)
     importAgents()
-    log("tracking every \(Int(interval))s into \(path)")
+    log("tracking window changes, heartbeat every \(Int(interval))s, into \(path)")
     RunLoop.main.run()
     #else
     _ = (store, path, interval)

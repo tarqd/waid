@@ -23,7 +23,7 @@ Requires macOS 14+ for tracking. The core, importer and MCP server also build an
 ## Run the tracker
 
 ```sh
-waid daemon            # samples the frontmost app every 5s
+waid daemon            # tracks the frontmost window as it changes, heartbeat every 5s
 ```
 
 On first run macOS asks for **Accessibility** access (window titles, document paths) and, per browser, **Automation** access (tab URLs). Without them waid tracks apps only.
