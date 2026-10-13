@@ -99,6 +99,7 @@ case "daemon":
     if !MacActivitySampler.accessibilityTrusted(prompt: true) {
         log("Accessibility access not granted; tracking apps only (no window titles). Grant it in System Settings > Privacy & Security > Accessibility.")
     }
+    MacActivitySampler.setAccessibilityTimeout(1)
     let sampler = MacActivitySampler()
     let recorder = ActivityRecorder(store: store, interval: interval)
     let ingestor = ClaudeCodeIngestor()
@@ -136,15 +137,22 @@ case "daemon":
             record(signal)
         }
     }
-    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in
+    func sampleFront() {
         // No frontmost app: nothing to sample, so open observations stop
         // extending and the heartbeat window closes them.
         if let sample = sampler.sample() { record(.sample(sample)) }
-    }, forMode: .common)
+    }
+    // A switch is sampled as it happens; the timer is the heartbeat that
+    // bounds what a crash loses, keeps the active stream current, and covers
+    // apps that post no Accessibility notifications.
+    let focusChanges = FocusChangeObserver(onChange: sampleFront)
+    focusChanges.start()
+    RunLoop.main.add(Timer(timeInterval: interval, repeats: true) { _ in sampleFront() }, forMode: .common)
     RunLoop.main.add(Timer(timeInterval: 300, repeats: true) { _ in importAgents() }, forMode: .common)
     importAgents()
-    log("tracking every \(Int(interval))s into \(path)")
-    RunLoop.main.run()
+    log("tracking window changes, heartbeat every \(Int(interval))s, into \(path)")
+    // Nothing else holds the observer, and the run loop never returns.
+    withExtendedLifetime(focusChanges) { RunLoop.main.run() }
     #else
     _ = (store, path, interval)
     fail("window tracking is only implemented on macOS; `waid import` and `waid mcp` work here")

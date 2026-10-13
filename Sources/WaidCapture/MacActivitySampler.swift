@@ -28,6 +28,13 @@ public final class MacActivitySampler {
 
     public init() {}
 
+    /// Caps how long any Accessibility request from this process waits on an
+    /// app that isn't responding, instead of the system default of about six
+    /// seconds, so one hung app can't stall the daemon's run loop.
+    public static func setAccessibilityTimeout(_ seconds: TimeInterval) {
+        _ = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), Float(seconds))
+    }
+
     /// Whether we have Accessibility access. With `prompt`, macOS shows the
     /// system dialog pointing the user at System Settings.
     @discardableResult
@@ -45,7 +52,7 @@ public final class MacActivitySampler {
                 .combinedSessionState, eventType: CGEventType(rawValue: ~0)!))
 
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        if let window = element(axApp, kAXFocusedWindowAttribute as String) {
+        if let window = Self.element(axApp, kAXFocusedWindowAttribute as String) {
             sample.title = string(window, kAXTitleAttribute as String)
             if let document = string(window, kAXDocumentAttribute as String),
                let url = URL(string: document), url.isFileURL {
@@ -72,7 +79,8 @@ public final class MacActivitySampler {
         return result?.stringValue
     }
 
-    private func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+    /// The element-valued `attribute` of `element`, if it has one.
+    static func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID()

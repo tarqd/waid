@@ -28,21 +28,22 @@ A Timing-class automatic time tracker for macOS that is **local-only** (no cloud
 | 18 | Billable is derived (project billable AND category not never-billable) and stored on the entry, unless set explicitly | Presales stays non-billable on a billable engagement, and internal work is never billable. Storing it means later changes to defaults don't rewrite history. |
 | 19 | Clients carry domains; a URL on a client's domain attributes the activity to that client even with no project | Lots of client work happens in the browser (Jira, Confluence, their admin consoles). |
 | 20 | Budgets are in hours only; no rates or invoicing | waid feeds the billing system (timesheet CSV), it doesn't replace it. |
+| 21 | The daemon samples on focus-change events and keeps a timer as the heartbeat | Polling alone dates every switch up to one interval late and misses visits shorter than it. App activation and Accessibility notifications (focused window, main window, title) give the switch instant; the timer bounds what a crash loses, keeps the active stream current, and covers apps that post no notifications. Easy to reverse: drop the observer and the timer is the old daemon. |
 
 ## Architecture
 
 ```
-            ┌──────────── waid daemon (launchd) ────────────┐
-NSWorkspace │ MacActivitySampler ─► ActivityRecorder ─┐     │
-AX / AS     │                                         ▼     │
-            │ ClaudeCodeIngestor (every 5 min) ─►  Store ◄──┼── waid mcp (stdio) ◄── Claude Code / Desktop / any MCP client
-~/.claude/  │                                    (SQLite)   │
-            └───────────────────────────────────────▲───────┘
+            ┌──────────── waid daemon (launchd) ──────────────────────────────────┐
+NSWorkspace │ FocusChangeObserver ─► MacActivitySampler ─► ActivityRecorder ─┐     │
+AX / AS     │ (and a heartbeat timer)                                       ▼     │
+            │ ClaudeCodeIngestor (every 5 min) ─►  Store ◄────────────────────────┼── waid mcp (stdio) ◄── Claude Code / Desktop / any MCP client
+~/.claude/  │                                    (SQLite)                         │
+            └───────────────────────────────────────▲─────────────────────────────┘
                                                     └────────── SwiftUI app (next)
 ```
 
 - `WaidCore`: `Database` (SQLite wrapper), `Store` (schema, queries, summaries), `ActivityRecorder` (writes the focus, active and locked streams from samples and lock/sleep/wake/unlock signals), `RuleEngine`, `TimeRange`, `ClaudeCodeIngestor`.
-- `WaidCapture`: `MacActivitySampler`, the only macOS-specific code.
+- `WaidCapture`: the only macOS-specific code. `FocusChangeObserver` reports when the front window may have changed; `MacActivitySampler` reads what is in front.
 - `WaidMCP`: `MCPServer` (JSON-RPC over stdio) and `WaidTools` (the tool surface).
 - `waid`: the CLI (`daemon`, `mcp`, `report`, `import`, `status`).
 
@@ -105,7 +106,7 @@ Days in every report are **local dates**: the date where the time happened, stor
 
 ### Capture details
 
-- The front app is sampled every 5 s, and every sample, lock, sleep, wake and unlock is passed to the recorder with the system zone.
+- The front app is sampled whenever it may have changed (another app activated, or the front app's focused window, main window or window title changed, bursts within 200 ms collapsed into one sample) and on a 5 s heartbeat, and every sample, lock, sleep, wake and unlock is passed to the recorder with the system zone. Accessibility requests time out after 1 s so a hung app can't stall the run loop.
 - `focus`: a change of app, title, URL or document starts a new observation, and the previous one is closed at the moment of the switch. Gaps longer than 3× the interval close it at its last heartbeat. Nothing is trimmed: a window left in front while you read or step away stays one observation.
 - `active`: extends while input was seen within one interval of a sample, and closes at the last input instant once it wasn't. The next input opens a new one.
 - `locked`: sleep, screens-did-sleep, session-resign and `com.apple.screenIsLocked` close the open focus and active observations and open a locked one; did-wake, screens-did-wake, session-became-active and `com.apple.screenIsUnlocked` close it. Sleep delivers no heartbeats, so closing on wake covers the gap. Wake fires while the lock screen is still up, so after a screen lock or session resign the daemon ignores did-wake and screens-did-wake, and only screen-unlocked or session-became-active end it.
