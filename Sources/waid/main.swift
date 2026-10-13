@@ -99,6 +99,7 @@ case "daemon":
     if !MacActivitySampler.accessibilityTrusted(prompt: true) {
         log("Accessibility access not granted; tracking apps only (no window titles). Grant it in System Settings > Privacy & Security > Accessibility.")
     }
+    MacActivitySampler.setAccessibilityTimeout(1)
     let sampler = MacActivitySampler()
     let recorder = ActivityRecorder(store: store, interval: interval)
     let ingestor = ClaudeCodeIngestor()
@@ -150,7 +151,8 @@ case "daemon":
     RunLoop.main.add(Timer(timeInterval: 300, repeats: true) { _ in importAgents() }, forMode: .common)
     importAgents()
     log("tracking window changes, heartbeat every \(Int(interval))s, into \(path)")
-    RunLoop.main.run()
+    // Nothing else holds the observer, and the run loop never returns.
+    withExtendedLifetime(focusChanges) { RunLoop.main.run() }
     #else
     _ = (store, path, interval)
     fail("window tracking is only implemented on macOS; `waid import` and `waid mcp` work here")

@@ -16,7 +16,7 @@ import ApplicationServices
 public final class FocusChangeObserver {
     private let debounce: TimeInterval
     private let onChange: () -> Void
-    private var activation: NSObjectProtocol?
+    private var activationObserver: NSObjectProtocol?
     private var pending: DispatchWorkItem?
 
     /// The Accessibility observer for the front app, and what it watches.
@@ -25,6 +25,9 @@ public final class FocusChangeObserver {
     private var observedWindow: AXUIElement?
 
     private static let appNotifications = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification]
+    /// Handed to Accessibility so the callback can find us; `stop()` runs
+    /// before we go away, so the pointer never outlives `self`.
+    private var refcon: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
 
     public init(debounce: TimeInterval = 0.2, onChange: @escaping () -> Void) {
         self.debounce = debounce
@@ -34,8 +37,8 @@ public final class FocusChangeObserver {
     deinit { stop() }
 
     public func start() {
-        guard activation == nil else { return }
-        activation = NSWorkspace.shared.notificationCenter.addObserver(
+        guard activationObserver == nil else { return }
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
             guard let self else { return }
@@ -47,8 +50,8 @@ public final class FocusChangeObserver {
     }
 
     public func stop() {
-        if let activation { NSWorkspace.shared.notificationCenter.removeObserver(activation) }
-        activation = nil
+        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+        activationObserver = nil
         pending?.cancel()
         pending = nil
         watch(pid: nil)
@@ -79,7 +82,6 @@ public final class FocusChangeObserver {
         var created: AXObserver?
         guard AXObserverCreate(pid, Self.callback, &created) == .success, let created else { return }
         let app = AXUIElementCreateApplication(pid)
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
         for name in Self.appNotifications {
             // Fails without Accessibility access; app switches still arrive.
             _ = AXObserverAddNotification(created, app, name as CFString, refcon)
@@ -98,12 +100,7 @@ public final class FocusChangeObserver {
             _ = AXObserverRemoveNotification(observer, window, kAXTitleChangedNotification as CFString)
         }
         observedWindow = nil
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &value) == .success,
-              let value, CFGetTypeID(value) == AXUIElementGetTypeID()
-        else { return }
-        let window = value as! AXUIElement
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        guard let window = MacActivitySampler.element(app, kAXFocusedWindowAttribute as String) else { return }
         if AXObserverAddNotification(observer, window, kAXTitleChangedNotification as CFString, refcon) == .success {
             observedWindow = window
         }

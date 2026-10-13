@@ -33,17 +33,17 @@ A Timing-class automatic time tracker for macOS that is **local-only** (no cloud
 ## Architecture
 
 ```
-            ┌──────────── waid daemon (launchd) ────────────┐
-NSWorkspace │ MacActivitySampler ─► ActivityRecorder ─┐     │
-AX / AS     │                                         ▼     │
-            │ ClaudeCodeIngestor (every 5 min) ─►  Store ◄──┼── waid mcp (stdio) ◄── Claude Code / Desktop / any MCP client
-~/.claude/  │                                    (SQLite)   │
-            └───────────────────────────────────────▲───────┘
+            ┌──────────── waid daemon (launchd) ──────────────────────────────────┐
+NSWorkspace │ FocusChangeObserver ─► MacActivitySampler ─► ActivityRecorder ─┐     │
+AX / AS     │ (and a heartbeat timer)                                       ▼     │
+            │ ClaudeCodeIngestor (every 5 min) ─►  Store ◄────────────────────────┼── waid mcp (stdio) ◄── Claude Code / Desktop / any MCP client
+~/.claude/  │                                    (SQLite)                         │
+            └───────────────────────────────────────▲─────────────────────────────┘
                                                     └────────── SwiftUI app (next)
 ```
 
 - `WaidCore`: `Database` (SQLite wrapper), `Store` (schema, queries, summaries), `ActivityRecorder` (writes the focus, active and locked streams from samples and lock/sleep/wake/unlock signals), `RuleEngine`, `TimeRange`, `ClaudeCodeIngestor`.
-- `WaidCapture`: `MacActivitySampler`, the only macOS-specific code.
+- `WaidCapture`: the only macOS-specific code. `FocusChangeObserver` reports when the front window may have changed; `MacActivitySampler` reads what is in front.
 - `WaidMCP`: `MCPServer` (JSON-RPC over stdio) and `WaidTools` (the tool surface).
 - `waid`: the CLI (`daemon`, `mcp`, `report`, `import`, `status`).
 
